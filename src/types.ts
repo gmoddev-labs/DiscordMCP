@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ActorIdentity } from './assistant-types.js';
 
 export const Snowflake = z.string().regex(/^\d{17,20}$/);
 export const PermissionName = z.string().regex(/^[A-Z_]+$/);
@@ -41,7 +42,7 @@ export type Operation = {
   resultId?: string; error?: string;
 };
 export type Plan = {
-  id: string; guildId: string; actor: string; mode: 'RECONCILE' | 'REPLACE';
+  id: string; guildId: string; actor: string; actorIdentity?:ActorIdentity; mode: 'RECONCILE' | 'REPLACE';
   blueprint: Blueprint; blueprintHash: string; mappingHash: string; preconditions: Record<string, string>;
   operations: Operation[]; status: 'planned' | 'running' | 'succeeded' | 'failed' | 'uncertain' | 'abandoned';
   createdAt: string; updatedAt: string;

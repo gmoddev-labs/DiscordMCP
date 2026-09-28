@@ -4,6 +4,7 @@ import { BlueprintSchema, ChannelSpec, RoleSpec, Snowflake, type Channel, type O
 import { DiscordAdapter, DiscordError, type DiscordChannel, type DiscordRole, type DiscordMember, type Snapshot } from './discord.js';
 import { Store } from './store.js';
 import { Bits, ChannelState, ChannelTypes, DesiredChannel, DesiredRole, Hash, RoleState, SetHash, Structural } from './structural.js';
+import {Assistant} from './assistant.js';
 
 function RoleBody(Spec:Role):Record<string,unknown> {
   return DesiredRole(Spec);
@@ -20,7 +21,8 @@ function OperationFor(Resource:Operation['resource'],Action:Operation['action'],
 
 export class ControlPlane {
   private readonly GuildQueues=new Map<string,Promise<void>>();
-  constructor(readonly Discord:DiscordAdapter,readonly Store:Store) {}
+  readonly Assistant:Assistant;
+  constructor(readonly Discord:DiscordAdapter,readonly Store:Store) {this.Assistant=new Assistant(Discord,Store);}
   private async WithGuildMutation<T>(GuildId:string,Work:()=>Promise<T>,PlanId?:string,AllowUncertain=false):Promise<T> {
     const Previous=this.GuildQueues.get(GuildId)??Promise.resolve();
     let Release!:()=>void;

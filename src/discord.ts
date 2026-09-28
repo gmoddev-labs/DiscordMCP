@@ -1,9 +1,11 @@
 import { Client, GatewayIntentBits, PermissionFlagsBits } from 'discord.js';
 import { setTimeout as Sleep } from 'node:timers/promises';
 import { Snowflake } from './types.js';
+import { EventDispatcher, NormalizeEvent } from './events.js';
+import type { OperationalEvent } from './assistant-types.js';
 
 export type DiscordRole = {id:string; name:string; permissions:string; position:number; managed:boolean; hoist?:boolean; mentionable?:boolean; color?:number};
-export type DiscordChannel = {id:string; name:string; type:number; parent_id?:string|null; position?:number; topic?:string|null; nsfw?:boolean; permission_overwrites?:{id:string;type:number;allow:string;deny:string}[];thread_metadata?:{archive_timestamp?:string}};
+export type DiscordChannel = {id:string; guild_id?:string; name:string; type:number; parent_id?:string|null; position?:number; topic?:string|null; nsfw?:boolean; permission_overwrites?:{id:string;type:number;allow:string;deny:string}[];thread_metadata?:{archive_timestamp?:string}};
 export type DiscordGuild = {id:string; name:string; owner_id:string; rules_channel_id?:string|null; public_updates_channel_id?:string|null; features?:string[]};
 export type DiscordMember = {user:{id:string;username:string;bot?:boolean}; roles:string[]; nick?:string|null};
 export type Snapshot = {
@@ -11,6 +13,12 @@ export type Snapshot = {
   omissions:string[]; capabilities:{permissions:string[]; highestRolePosition:number; memberList:boolean};
   guild:DiscordGuild; roles:DiscordRole[]; channels:DiscordChannel[]; members?:DiscordMember[];
 };
+export type DiscordMessage={id:string;channel_id:string;guild_id?:string;author:{id:string;username?:string};content:string;
+  timestamp:string;edited_timestamp?:string|null;type:number;attachments?:{id:string;filename:string;size:number;url:string}[]};
+export type MessageRecord={id:string;guildId:string;channelId:string;authorId:string;content:string;createdAt:string;
+  editedAt?:string;type:number;attachments:{id:string;filename:string;size:number;url:string}[]};
+export type AuditEvent={id:string;guildId:string;actionType:number;actorId?:string;targetId?:string;
+  reason?:string;createdAt:string;changes?:{key:string;oldValue?:unknown;newValue?:unknown}[]};
 
 export class DiscordError extends Error {
   constructor(readonly Status: number, readonly Code: string, Message: string) { super(Message); }
@@ -22,10 +30,38 @@ export class DiscordAdapter {
   private GlobalUntil = 0;
   private readonly BucketUntil = new Map<string,number>();
   private readonly RouteBuckets = new Map<string,string>();
+  readonly Events=new EventDispatcher();
   constructor(Token: string,private readonly FetchImpl:typeof fetch=fetch) {
     this.Token = Token;
-    this.Client = new Client({intents:[GatewayIntentBits.Guilds]});
+    const Intents=[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMessages];
+    if (process.env.CONTROL_MEMBER_EVENTS==='true') Intents.push(GatewayIntentBits.GuildMembers);
+    this.Client = new Client({intents:Intents});
+    this.Client.on('messageCreate',Message=>{
+      if (Message.guildId) this.Events.Dispatch(NormalizeEvent({guildId:Message.guildId,type:'message.created',
+        channelId:Message.channelId,messageId:Message.id,authorId:Message.author.id}));
+    });
+    this.Client.on('messageUpdate',(_Old,Message)=>{
+      if (Message.guildId) this.Events.Dispatch(NormalizeEvent({guildId:Message.guildId,type:'message.updated',
+        channelId:Message.channelId,messageId:Message.id,authorId:Message.author?.id}));
+    });
+    this.Client.on('messageDelete',Message=>{
+      if (Message.guildId) this.Events.Dispatch(NormalizeEvent({guildId:Message.guildId,type:'message.deleted',
+        channelId:Message.channelId,messageId:Message.id}));
+    });
+    this.Client.on('guildMemberAdd',Member=>this.Events.Dispatch(NormalizeEvent({guildId:Member.guild.id,type:'member.joined',
+      userId:Member.id,accountCreatedAt:Member.user.createdAt.toISOString()})));
+    this.Client.on('guildMemberRemove',Member=>this.Events.Dispatch(NormalizeEvent({guildId:Member.guild.id,type:'member.left',userId:Member.id})));
+    this.Client.on('roleCreate',Role=>this.Events.Dispatch(NormalizeEvent({guildId:Role.guild.id,type:'role.created',roleId:Role.id})));
+    this.Client.on('roleUpdate',(_Old,Role)=>this.Events.Dispatch(NormalizeEvent({guildId:Role.guild.id,type:'role.updated',roleId:Role.id})));
+    this.Client.on('roleDelete',Role=>this.Events.Dispatch(NormalizeEvent({guildId:Role.guild.id,type:'role.deleted',roleId:Role.id})));
+    this.Client.on('channelCreate',Channel=>{if ('guildId' in Channel&&Channel.guildId)
+      this.Events.Dispatch(NormalizeEvent({guildId:Channel.guildId,type:'channel.created',channelId:Channel.id}));});
+    this.Client.on('channelUpdate',(_Old,Channel)=>{if ('guildId' in Channel&&Channel.guildId)
+      this.Events.Dispatch(NormalizeEvent({guildId:Channel.guildId,type:'channel.updated',channelId:Channel.id}));});
+    this.Client.on('channelDelete',Channel=>{if ('guildId' in Channel&&Channel.guildId)
+      this.Events.Dispatch(NormalizeEvent({guildId:Channel.guildId,type:'channel.deleted',channelId:Channel.id}));});
   }
+  OnEvent(Handler:(EventValue:OperationalEvent)=>void|Promise<void>):()=>void {return this.Events.Subscribe(Handler);}
   async Start(): Promise<void> { await this.Client.login(this.Token); }
   Stop(): void { this.Client.destroy(); }
   GetActiveServers(): {id:string;name:string;available:boolean;memberCount:number}[] {
@@ -115,6 +151,45 @@ export class DiscordAdapter {
       After=Last;
     }
     return Members;
+  }
+  private async CheckChannel(GuildId:string,ChannelId:string):Promise<void> {
+    Snowflake.parse(GuildId);Snowflake.parse(ChannelId);
+    if (!this.Client.guilds.cache.has(GuildId)) throw new Error('Bot is not in the exact requested guild');
+    const Channel=await this.Get<DiscordChannel>(`/channels/${ChannelId}`);
+    if (Channel.guild_id!==GuildId) throw new Error('Channel does not belong to the exact requested guild');
+  }
+  private MessageRecord(GuildId:string,Value:DiscordMessage):MessageRecord {
+    return {id:Value.id,guildId:GuildId,channelId:Value.channel_id,authorId:Value.author.id,content:Value.content,
+      createdAt:Value.timestamp,editedAt:Value.edited_timestamp??undefined,type:Value.type,
+      attachments:(Value.attachments??[]).map(Item=>({id:Item.id,filename:Item.filename,size:Item.size,url:Item.url}))};
+  }
+  async GetMessage(GuildId:string,ChannelId:string,MessageId:string):Promise<{message:MessageRecord;completeness:'exact-fetch'}> {
+    Snowflake.parse(MessageId);await this.CheckChannel(GuildId,ChannelId);
+    const Message=await this.Get<DiscordMessage>(`/channels/${ChannelId}/messages/${MessageId}`);
+    return {message:this.MessageRecord(GuildId,Message),completeness:'exact-fetch'};
+  }
+  async GetRecentMessages(GuildId:string,ChannelId:string,Limit:number,Before?:string):Promise<{
+    messages:MessageRecord[];nextCursor?:string;limit:number;completeness:'bounded-fetch'}> {
+    if (Before) Snowflake.parse(Before);
+    await this.CheckChannel(GuildId,ChannelId);
+    const Query=`?limit=${Limit}${Before?`&before=${Before}`:''}`;
+    const Messages=await this.Get<DiscordMessage[]>(`/channels/${ChannelId}/messages${Query}`);
+    return {messages:Messages.map(Item=>this.MessageRecord(GuildId,Item)),
+      nextCursor:Messages.length===Limit?Messages.at(-1)?.id:undefined,limit:Limit,completeness:'bounded-fetch'};
+  }
+  async GetAuditEvents(GuildId:string,Limit:number,Before?:string):Promise<{
+    events:AuditEvent[];nextCursor?:string;limit:number;completeness:'bounded-fetch'}> {
+    Snowflake.parse(GuildId);if (Before) Snowflake.parse(Before);
+    if (!this.Client.guilds.cache.has(GuildId)) throw new Error('Bot is not in the exact requested guild');
+    const Query=`?limit=${Limit}${Before?`&before=${Before}`:''}`;
+    const Result=await this.Get<{audit_log_entries:{id:string;action_type:number;user_id?:string;target_id?:string;
+      reason?:string;changes?:{key:string;old_value?:unknown;new_value?:unknown}[]}[]}>(`/guilds/${GuildId}/audit-logs${Query}`);
+    const Events=Result.audit_log_entries.map(Item=>({id:Item.id,guildId:GuildId,actionType:Item.action_type,
+      actorId:Item.user_id,targetId:Item.target_id,reason:Item.reason,
+      createdAt:new Date(Number(BigInt(Item.id)>>22n)+1420070400000).toISOString(),
+      changes:Item.changes?.filter(Change=>!/(token|secret|authorization|password|webhook_url)/i.test(Change.key))
+        .map(Change=>({key:Change.key,oldValue:Change.old_value,newValue:Change.new_value}))}));
+    return {events:Events,nextCursor:Events.length===Limit?Events.at(-1)?.id:undefined,limit:Limit,completeness:'bounded-fetch'};
   }
   async GetAllChannels(GuildId:string,ThreadScope:'none'|'active'|'allAccessible'='none'):
     Promise<{guildId:string;channels:DiscordChannel[];threads:DiscordChannel[];completeness:{channels:'complete'|'accessible_only';threads:'none'|'active'|'all_accessible'|'partial'};omissions:string[]}> {

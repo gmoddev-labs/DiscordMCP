@@ -33,7 +33,7 @@ for (const Signal of ['SIGINT','SIGTERM'] as const)
   });});
 
 if (Stdio) {
-  await serveStdio(()=>BuildMcpServer(Control,Actor));
+  await serveStdio(()=>BuildMcpServer(Control,{id:`local-mcp:${Actor}`,kind:'local-mcp',displayName:Actor}));
   await Shutdown();
 } else {
   const Host=process.env.CONTROL_HOST??'127.0.0.1';

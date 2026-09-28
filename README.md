@@ -12,7 +12,7 @@ A deterministic Discord administration service for Codex and other MCP clients. 
 - Plan focused role/channel create, update, or delete operations by exact ID. `PlanWipeChannels` and `PlanWipeRoles` produce reviewable deletion plans. Reorder editable roles by exact IDs.
 - Add/remove one member role, kick one member, or ban one member with exact IDs and hierarchy preflight.
 
-This is a structural v1. AutoMod, onboarding, messages, webhooks, invites, emoji, stickers, events, bulk member moderation, and structural reconstruction are not implemented yet. A snapshot explicitly reports channel/thread/member completeness rather than claiming full coverage. Webhook tokens and bot credentials never enter snapshots or plans.
+The structural control plane also has a personal assistant foundation. It records normalized gateway event metadata, reads bounded message and Discord audit-log pages, and stores operator notifications. AutoMod, onboarding, message mutations, webhooks, invites, emoji, stickers, workflows, and moderation cases are not implemented. A snapshot explicitly reports channel/thread/member completeness rather than claiming full coverage. Webhook tokens and bot credentials never enter snapshots or plans.
 
 ## Setup
 
@@ -22,6 +22,18 @@ This is a structural v1. AutoMod, onboarding, messages, webhooks, invites, emoji
 4. Start local MCP with `node --env-file=.env dist/main.js --stdio`, or start the loopback HTTP service with `node --env-file=.env dist/main.js`.
 
 The HTTP service binds to `127.0.0.1:8787` by default. It rejects non-loopback binding, checks Host and Origin, and requires `Authorization: Bearer <CONTROL_API_TOKEN>` on `/mcp` and `/v1/call`. `/health` is unauthenticated. Set `CONTROL_ACTOR` to identify the operator in plans and Discord audit log reasons. Stdio trusts the local launching process and uses the same actor setting.
+
+`CONTROL_EVENT_RETENTION_DAYS` defaults to 30 (allowed range 1–365). Expired gateway events are removed at startup and after every 100 observed events. Event records contain IDs, type, and timestamp; message content is never stored in the event table. Set `CONTROL_MEMBER_EVENTS=true` only if the bot has the privileged Server Members intent enabled. `CONTROL_DISCORD_OPERATOR_IDS` accepts comma-separated Discord user IDs for future Discord-side interfaces; no Discord slash commands are registered yet.
+
+Local MCP and authenticated local HTTP requests have distinct actor identities in plan and action audit state. Discord user identities are denied by default unless explicitly configured. The assistant capability policy is deterministic; structural changes still use the existing plan/apply/verify path.
+
+### Assistant reads
+
+`GetMessage`, `GetRecentMessages`, and `GetAuditEvents` fetch exact Discord resources. Message pages are limited to 100 items and audit pages to 100, each with a `before` cursor. `GetRecentActivity` reads locally observed gateway events with a maximum of 200 records per page and a sequence cursor. `GetOperatorBrief` combines one bounded activity page with unacknowledged notifications and states its coverage limits. `CreateNotification`, `GetNotifications`, and `AcknowledgeNotification` manage the local operator inbox. MCP also exposes `discord://guilds`, `discord://guild/{guildId}/activity`, and `discord://guild/{guildId}/notifications` resources.
+
+These reads do not claim historical completeness for periods when the local service was offline. Reading message content requires Discord channel access and `Read Message History`; the service does not persist fetched message bodies. Discord audit reads require `View Audit Log`.
+
+The SQLite schema uses ordered `user_version` migrations. Existing control databases are upgraded in place and retain their plan and mapping records. Back up `data/control.db` before an operator-initiated migration if its audit history matters.
 
 ### HTTP example
 
