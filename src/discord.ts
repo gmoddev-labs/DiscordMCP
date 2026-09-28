@@ -21,7 +21,8 @@ export class DiscordAdapter {
   private readonly Token: string;
   private GlobalUntil = 0;
   private readonly BucketUntil = new Map<string,number>();
-  constructor(Token: string) {
+  private readonly RouteBuckets = new Map<string,string>();
+  constructor(Token: string,private readonly FetchImpl:typeof fetch=fetch) {
     this.Token = Token;
     this.Client = new Client({intents:[GatewayIntentBits.Guilds]});
   }
@@ -31,30 +32,37 @@ export class DiscordAdapter {
     return this.Client.guilds.cache.map(Guild => ({id:Guild.id,name:Guild.name,available:Guild.available,memberCount:Guild.memberCount}));
   }
   private async Request<T>(Method:string, Path:string, Body?:unknown, Reason?:string): Promise<T> {
-    const Route = `${Method} ${Path.replace(/\d{17,20}/g, ':id')}`;
+    const Route = `${Method} ${Path.split('?')[0]?.replace(/\d{17,20}/g, ':id')}`;
+    const MajorMatch=Path.match(/^\/(guilds|channels|webhooks)\/(\d{17,20})(?:\/|\?|$)/);
+    const Major=MajorMatch?`${MajorMatch[1]}:${MajorMatch[2]}`:'global';
     for (let Attempt=0; Attempt<6; Attempt++) {
-      const Until = Math.max(this.GlobalUntil, this.BucketUntil.get(Route) ?? 0);
+      const BucketName=this.RouteBuckets.get(Route)??`route:${Route}`;
+      const BucketKey=`${BucketName}|${Major}`;
+      const Until = Math.max(this.GlobalUntil, this.BucketUntil.get(BucketKey) ?? 0);
       if (Until>Date.now()) await Sleep(Until-Date.now());
       const Headers: Record<string,string> = {Authorization:`Bot ${this.Token}`};
       if (Body !== undefined) Headers['Content-Type']='application/json';
       if (Reason) Headers['X-Audit-Log-Reason']=encodeURIComponent(Reason.slice(0,512));
       let Response: Response;
-      try { Response = await fetch(`https://discord.com/api/v10${Path}`, {method:Method,headers:Headers,body:Body===undefined?undefined:JSON.stringify(Body)}); }
+      try { Response = await this.FetchImpl(`https://discord.com/api/v10${Path}`, {method:Method,headers:Headers,body:Body===undefined?undefined:JSON.stringify(Body)}); }
       catch (Cause) {
         // A timed-out mutation may have succeeded. Only reads can be replayed safely.
         if (Method!=='GET'||Attempt===5) throw new DiscordError(0,'NETWORK',String(Cause));
         await Sleep(250*(Attempt+1)); continue;
       }
+      const ObservedBucket=Response.headers.get('x-ratelimit-bucket');
+      if (ObservedBucket) this.RouteBuckets.set(Route,ObservedBucket);
+      const ObservedKey=`${ObservedBucket??BucketName}|${Major}`;
       if (Response.status===429) {
         const Result = await Response.json() as {retry_after?:number;global?:boolean};
         const Delay = Math.max(100,Math.ceil((Result.retry_after??1)*1000));
         if (Result.global) this.GlobalUntil=Date.now()+Delay;
-        else this.BucketUntil.set(Route,Date.now()+Delay);
+        else this.BucketUntil.set(ObservedKey,Date.now()+Delay);
         continue;
       }
       const Remaining = Response.headers.get('x-ratelimit-remaining');
       const ResetAfter = Number(Response.headers.get('x-ratelimit-reset-after') ?? 0);
-      if (Remaining==='0' && ResetAfter>0) this.BucketUntil.set(Route,Date.now()+Math.ceil(ResetAfter*1000));
+      if (Remaining==='0' && ResetAfter>0) this.BucketUntil.set(ObservedKey,Date.now()+Math.ceil(ResetAfter*1000));
       if (!Response.ok) {
         const Result = await Response.json().catch(() => ({})) as {code?:number;message?:string};
         throw new DiscordError(Response.status,String(Result.code??'HTTP_ERROR'),Result.message??`Discord HTTP ${Response.status}`);
@@ -115,26 +123,36 @@ export class DiscordAdapter {
     const Omissions=[...SnapshotValue.omissions.filter(Item=>Item!=='Threads omitted')];
     let Completeness:'none'|'active'|'all_accessible'|'partial'='none';
     if (ThreadScope!=='none') {
-      const Active=await this.Get<{threads:DiscordChannel[]}>(`/guilds/${GuildId}/threads/active`);
-      for (const Item of Active.threads) Threads.set(Item.id,Item);
-      Completeness='active';
+      try {
+        const Active=await this.Get<{threads:DiscordChannel[]}>(`/guilds/${GuildId}/threads/active`);
+        for (const Item of Active.threads) Threads.set(Item.id,Item);
+        Completeness='active';
+      } catch (Cause) {
+        Omissions.push(`Active threads unavailable: ${Cause instanceof Error?Cause.message:String(Cause)}`);
+        Completeness='partial';
+      }
     }
     if (ThreadScope==='allAccessible') {
-      Completeness='all_accessible';
+      if (Completeness!=='partial') Completeness='all_accessible';
       const Parents=SnapshotValue.channels.filter(Item=>[0,5,15,16].includes(Item.type));
       for (const Parent of Parents) {
         for (const Kind of Parent.type===0?['public','private']:['public']) {
+          let JoinedPrivate=Kind==='private'&&!SnapshotValue.capabilities.permissions.some(Name=>Name==='Administrator'||Name==='ManageThreads');
           let Before:string|undefined;
           while (true) {
             try {
               const Query=Before?`?limit=100&before=${encodeURIComponent(Before)}`:'?limit=100';
-              const Page=await this.Get<{threads:DiscordChannel[];has_more:boolean}>(`/channels/${Parent.id}/threads/archived/${Kind}${Query}`);
+              const Base=JoinedPrivate?`/channels/${Parent.id}/users/@me/threads/archived/private`:`/channels/${Parent.id}/threads/archived/${Kind}`;
+              const Page=await this.Get<{threads:DiscordChannel[];has_more:boolean}>(`${Base}${Query}`);
               for (const Item of Page.threads) Threads.set(Item.id,Item);
               if (!Page.has_more) break;
-              const Next=Page.threads.at(-1)?.thread_metadata?.archive_timestamp;
+              const Next=JoinedPrivate?Page.threads.at(-1)?.id:Page.threads.at(-1)?.thread_metadata?.archive_timestamp;
               if (!Next||Next===Before) {Omissions.push(`Archive pagination did not advance for ${Parent.id}/${Kind}`);Completeness='partial';break;}
               Before=Next;
             } catch (Cause) {
+              if (Kind==='private'&&!JoinedPrivate&&Cause instanceof DiscordError&&Cause.Status===403) {
+                JoinedPrivate=true;Before=undefined;continue;
+              }
               Omissions.push(`Archived ${Kind} threads unavailable for ${Parent.id}: ${Cause instanceof Error?Cause.message:String(Cause)}`);
               Completeness='partial';break;
             }

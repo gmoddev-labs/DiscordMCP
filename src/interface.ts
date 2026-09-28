@@ -20,6 +20,9 @@ export const Calls = {
   PlanWipeChannels:GuildInput,
   PlanWipeRoles:GuildInput,
   ApplyPlan:z.object({planId:z.string().startsWith('plan_')}),
+  AbandonPlan:z.object({planId:z.string().startsWith('plan_')}),
+  ResolveUncertainAction:z.object({actionId:z.string().startsWith('action_')}),
+  GetUncertainActions:GuildInput,
   VerifyServer:z.object({planId:z.string().startsWith('plan_')}),
   AddMemberRole:MemberRoleInput,
   RemoveMemberRole:MemberRoleInput,
@@ -42,6 +45,9 @@ export async function Dispatch(Control:ControlPlane,Name:CallName,Raw:unknown,Ac
     case 'PlanWipeChannels': {const A=Calls.PlanWipeChannels.parse(Raw);return Control.PlanServer(A.guildId,{version:1,roles:[],channels:[],policy:{pruneChannels:true,pruneRoles:false}},'RECONCILE',Actor);}
     case 'PlanWipeRoles': {const A=Calls.PlanWipeRoles.parse(Raw);return Control.PlanServer(A.guildId,{version:1,roles:[],channels:[],policy:{pruneChannels:false,pruneRoles:true}},'RECONCILE',Actor);}
     case 'ApplyPlan': {const A=Calls.ApplyPlan.parse(Raw);return Control.ApplyPlan(A.planId,Actor);}
+    case 'AbandonPlan': {const A=Calls.AbandonPlan.parse(Raw);return Control.AbandonPlan(A.planId,Actor);}
+    case 'ResolveUncertainAction': {const A=Calls.ResolveUncertainAction.parse(Raw);await Control.ResolveUncertainAction(A.actionId,Actor);return {ok:true};}
+    case 'GetUncertainActions': {const A=Calls.GetUncertainActions.parse(Raw);return Control.GetUncertainActions(A.guildId);}
     case 'VerifyServer': {const A=Calls.VerifyServer.parse(Raw);return Control.VerifyServer(A.planId);}
     case 'AddMemberRole': {const A=Calls.AddMemberRole.parse(Raw);await Control.AddMemberRole(A.guildId,A.userId,A.roleId,Actor);return {ok:true};}
     case 'RemoveMemberRole': {const A=Calls.RemoveMemberRole.parse(Raw);await Control.RemoveMemberRole(A.guildId,A.userId,A.roleId,Actor);return {ok:true};}
@@ -74,6 +80,9 @@ export function BuildMcpServer(Control:ControlPlane,Actor:string):McpServer {
   Register('PlanWipeChannels','Plan deletion of all accessible ordinary channels in an exact guild.',Calls.PlanWipeChannels);
   Register('PlanWipeRoles','Plan deletion of all mutable roles in an exact guild.',Calls.PlanWipeRoles);
   Register('ApplyPlan','Execute a persisted plan bound to the same authenticated actor.',Calls.ApplyPlan);
+  Register('AbandonPlan','After inspecting an interrupted plan, mark it terminal so a fresh plan can be created.',Calls.AbandonPlan);
+  Register('ResolveUncertainAction','After inspecting an uncertain direct action, clear its guild mutation hold.',Calls.ResolveUncertainAction);
+  Register('GetUncertainActions','List unresolved direct actions for an exact guild.',Calls.GetUncertainActions);
   Register('VerifyServer','Fetch final state and compare blueprint resources.',Calls.VerifyServer);
   Register('AddMemberRole','Assign one editable role to an exact member.',Calls.AddMemberRole);
   Register('RemoveMemberRole','Remove one editable role from an exact member.',Calls.RemoveMemberRole);

@@ -43,6 +43,6 @@ export type Operation = {
 export type Plan = {
   id: string; guildId: string; actor: string; mode: 'RECONCILE' | 'REPLACE';
   blueprint: Blueprint; blueprintHash: string; mappingHash: string; preconditions: Record<string, string>;
-  operations: Operation[]; status: 'planned' | 'running' | 'succeeded' | 'failed' | 'uncertain';
+  operations: Operation[]; status: 'planned' | 'running' | 'succeeded' | 'failed' | 'uncertain' | 'abandoned';
   createdAt: string; updatedAt: string;
 };

@@ -37,7 +37,7 @@ export class Store {
     this.Db.prepare('DELETE FROM mappings WHERE guild_id=? AND kind=? AND resource_id=?').run(GuildId, Kind, Id);
   }
   GetMappings(GuildId: string, Kind: string): Record<string,string> {
-    const Rows = this.Db.prepare('SELECT semantic_key,resource_id FROM mappings WHERE guild_id=? AND kind=?').all(GuildId, Kind) as {semantic_key:string,resource_id:string}[];
+    const Rows = this.Db.prepare('SELECT semantic_key,resource_id FROM mappings WHERE guild_id=? AND kind=? ORDER BY semantic_key').all(GuildId, Kind) as {semantic_key:string,resource_id:string}[];
     return Object.fromEntries(Rows.map(Row => [Row.semantic_key, Row.resource_id]));
   }
   HasActivePlan(GuildId: string, ExceptId?: string): boolean {
@@ -48,6 +48,21 @@ export class Store {
   RecordAction(Id:string,GuildId:string,Actor:string,Kind:string,TargetId:string,State:string,ErrorMessage?:string):void {
     this.Db.prepare(`INSERT INTO direct_actions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,error=excluded.error,updated_at=excluded.updated_at`)
       .run(Id,GuildId,Actor,Kind,TargetId,State,ErrorMessage??null,new Date().toISOString());
+  }
+  HasUncertainAction(GuildId:string):boolean {
+    return Boolean(this.Db.prepare("SELECT id FROM direct_actions WHERE guild_id=? AND state IN ('running','uncertain') LIMIT 1").get(GuildId));
+  }
+  GetAction(Id:string):{id:string;guild_id:string;actor:string;kind:string;target_id:string;state:string;error:string|null}|undefined {
+    return this.Db.prepare('SELECT * FROM direct_actions WHERE id=?').get(Id) as ReturnType<Store['GetAction']>;
+  }
+  ListUncertainActions(GuildId:string) {
+    return this.Db.prepare("SELECT id,guild_id,actor,kind,target_id,state,error,updated_at FROM direct_actions WHERE guild_id=? AND state IN ('running','uncertain') ORDER BY updated_at")
+      .all(GuildId);
+  }
+  ResolveAction(Id:string,Actor:string):void {
+    const Action=this.GetAction(Id);
+    if (!Action||Action.actor!==Actor||!['running','uncertain'].includes(Action.state)) throw new Error('No uncertain action for this actor');
+    this.RecordAction(Id,Action.guild_id,Actor,Action.kind,Action.target_id,'resolved');
   }
   Close(): void { this.Db.close(); }
 }

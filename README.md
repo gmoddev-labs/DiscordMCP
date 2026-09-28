@@ -54,8 +54,12 @@ Call `PlanServer` with `guildId`, `blueprint`, and `mode: "RECONCILE"`; inspect 
 
 Semantic keys map to exact Discord IDs in SQLite. Reconciliation never adopts an existing resource by name. If a matching name exists without a mapping, call `AdoptResource` with the exact ID first. A plan records the affected resources' pre-state; changed resources cause `PLAN_STALE`. Completed operations and created IDs are stored after each mutation. If an operation is left `running` after an interruption or network uncertainty, the plan is marked uncertain and requires inspection; it is never blindly replayed.
 
+Managed channel overwrites are exact desired state: an empty `overwrites` array clears existing overwrites, and unspecified grants are removed. A matching blueprint produces zero update operations. Destructive plans also bind to the channel/editable-role ID sets so resources added between planning and application cause `PLAN_STALE` before mutation. Ordinary message activity does not invalidate these structural checks.
+
+Failed and interrupted plans are terminal. Inspect Discord and the plan with `VerifyServer`, then use `AbandonPlan` and create a fresh plan. An ambiguous direct action records its action ID in the error; `GetUncertainActions` lists unresolved actions. After checking the outcome in Discord, call `ResolveUncertainAction` to release that guild's mutation hold. This acknowledgment does not replay the action.
+
 SQLite is stored at `./data/control.db` by default, with WAL enabled. Back up this database if you need to preserve semantic mappings and execution records. The HTTP service is intentionally single-node and loopback-only.
 
 ## Development
 
-Run `npm run build` and `npm test`. The tests use a fake Discord adapter; live Discord integration requires a configured bot and a test guild.
+Run `npm run build` and `npm test`. GitHub Actions runs `npm ci`, build, and tests on pushes and pull requests. Tests use a fake Discord adapter and a local HTTP listener; live Discord integration requires a configured bot and a test guild.

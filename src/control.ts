@@ -1,54 +1,60 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { ChannelType, PermissionFlagsBits } from 'discord.js';
 import { BlueprintSchema, ChannelSpec, RoleSpec, Snowflake, type Channel, type Operation, type Plan, type Role } from './types.js';
 import { DiscordAdapter, DiscordError, type DiscordChannel, type DiscordRole, type DiscordMember, type Snapshot } from './discord.js';
 import { Store } from './store.js';
+import { Bits, ChannelState, ChannelTypes, DesiredChannel, DesiredRole, Hash, RoleState, SetHash, Structural } from './structural.js';
 
-const ChannelTypes:Record<Channel['type'],number> = {
-  category:ChannelType.GuildCategory,text:ChannelType.GuildText,voice:ChannelType.GuildVoice,
-  forum:ChannelType.GuildForum,announcement:ChannelType.GuildAnnouncement,
-  stage:ChannelType.GuildStageVoice,media:ChannelType.GuildMedia
-};
-function Hash(Value:unknown):string {return createHash('sha256').update(JSON.stringify(Value)).digest('hex');}
-function Bits(Names:string[]):string {
-  let Result=0n;
-  for (const Name of Names) {
-    const Key=Name.toLowerCase().split('_').map((Part,Index)=>Index?Part[0]?.toUpperCase()+Part.slice(1):Part).join('');
-    const Actual=Key[0]?.toUpperCase()+Key.slice(1);
-    const Bit=(PermissionFlagsBits as Record<string,bigint>)[Actual];
-    if (Bit===undefined) throw new Error(`Unknown permission ${Name}`);
-    Result|=Bit;
-  }
-  return Result.toString();
-}
 function RoleBody(Spec:Role):Record<string,unknown> {
-  return {name:Spec.name,permissions:Bits(Spec.permissions),hoist:Spec.hoist??false,
-    mentionable:Spec.mentionable??false,color:Spec.color??0};
+  return DesiredRole(Spec);
 }
 function EditableRole(RoleValue:DiscordRole, SnapshotValue:Snapshot):boolean {
   return RoleValue.id!==SnapshotValue.guildId && !RoleValue.managed && RoleValue.position<SnapshotValue.capabilities.highestRolePosition;
 }
+function HasPermission(SnapshotValue:Snapshot,Name:string):boolean {
+  return SnapshotValue.capabilities.permissions.includes('Administrator')||SnapshotValue.capabilities.permissions.includes(Name);
+}
 function OperationFor(Resource:Operation['resource'],Action:Operation['action'],Key?:string,TargetId?:string,Desired?:Operation['desired']):Operation {
   return {id:randomUUID(),resource:Resource,action:Action,key:Key,targetId:TargetId,desired:Desired,state:'pending'};
 }
-function Structural(Item:DiscordRole|DiscordChannel|undefined):string {return Hash(Item??null);}
 
 export class ControlPlane {
-  private readonly Applying=new Set<string>();
+  private readonly GuildQueues=new Map<string,Promise<void>>();
   constructor(readonly Discord:DiscordAdapter,readonly Store:Store) {}
+  private async WithGuildMutation<T>(GuildId:string,Work:()=>Promise<T>,PlanId?:string,AllowUncertain=false):Promise<T> {
+    const Previous=this.GuildQueues.get(GuildId)??Promise.resolve();
+    let Release!:()=>void;
+    const Gate=new Promise<void>(Resolve=>{Release=Resolve;});
+    const Queued=Previous.then(()=>Gate);
+    this.GuildQueues.set(GuildId,Queued);
+    await Previous;
+    try {
+      if (this.Store.HasActivePlan(GuildId,PlanId)||(!AllowUncertain&&this.Store.HasUncertainAction(GuildId)))
+        throw new Error('An active or uncertain mutation owns this guild');
+      return await Work();
+    } finally {
+      Release();
+      if (this.GuildQueues.get(GuildId)===Queued) this.GuildQueues.delete(GuildId);
+    }
+  }
   GetActiveServers() {return this.Discord.GetActiveServers();}
   GetServerSnapshot(GuildId:string,IncludeMembers=false) {return this.Discord.Snapshot(GuildId,IncludeMembers);}
   GetAllMembers(GuildId:string) {return this.Discord.GetAllMembers(GuildId);}
   GetAllChannels(GuildId:string,ThreadScope:'none'|'active'|'allAccessible'='none') {return this.Discord.GetAllChannels(GuildId,ThreadScope);}
-  async GetCapabilities(GuildId:string) {return (await this.Discord.Snapshot(GuildId)).capabilities;}
+  async GetCapabilities(GuildId:string) {
+    const SnapshotValue=await this.Discord.Snapshot(GuildId);
+    return {...SnapshotValue.capabilities,actions:{manageRoles:HasPermission(SnapshotValue,'ManageRoles'),
+      kickMembers:HasPermission(SnapshotValue,'KickMembers'),banMembers:HasPermission(SnapshotValue,'BanMembers')}};
+  }
   async AdoptResource(GuildId:string,Kind:'role'|'channel',Key:string,ResourceId:string):Promise<{guildId:string;kind:string;key:string;resourceId:string}> {
     Snowflake.parse(GuildId); Snowflake.parse(ResourceId);
-    if (this.Applying.has(GuildId)||this.Store.HasActivePlan(GuildId)) throw new Error('A plan is active for this guild');
-    const SnapshotValue=await this.Discord.Snapshot(GuildId);
-    const List=Kind==='role'?SnapshotValue.roles:SnapshotValue.channels;
-    if (!List.some(Item=>Item.id===ResourceId)) throw new Error('Exact resource ID is absent from snapshot');
-    this.Store.SetMapping(GuildId,Kind,Key,ResourceId);
-    return {guildId:GuildId,kind:Kind,key:Key,resourceId:ResourceId};
+    return this.WithGuildMutation(GuildId,async()=>{
+      const SnapshotValue=await this.Discord.Snapshot(GuildId);
+      const List=Kind==='role'?SnapshotValue.roles:SnapshotValue.channels;
+      if (!List.some(Item=>Item.id===ResourceId)) throw new Error('Exact resource ID is absent from snapshot');
+      this.Store.SetMapping(GuildId,Kind,Key,ResourceId);
+      return {guildId:GuildId,kind:Kind,key:Key,resourceId:ResourceId};
+    });
   }
   private MappingHash(GuildId:string):string {
     return Hash({roles:this.Store.GetMappings(GuildId,'role'),channels:this.Store.GetMappings(GuildId,'channel')});
@@ -87,7 +93,8 @@ export class ControlPlane {
     }
     const OperationValue=OperationFor(Kind,Action,Spec?.key,TargetId,Spec as Role|Channel|undefined);
     const Preconditions:Record<string,string>={};
-    if (Existing&&TargetId) Preconditions[`${Kind}:${TargetId}`]=Structural(Existing);
+    if (Existing&&TargetId) Preconditions[`${Kind}:${TargetId}`]=Structural(Existing,Kind);
+    if (Action==='create'&&Spec) Preconditions[`absence:${Kind}:${encodeURIComponent(Spec.name)}`]='absent';
     const EmptyBlueprint=BlueprintSchema.parse({version:1,roles:[],channels:[]});
     const Now=new Date().toISOString();
     const PlanValue:Plan={id:`plan_${randomUUID()}`,guildId:GuildId,actor:Actor,mode:'RECONCILE',blueprint:EmptyBlueprint,
@@ -119,19 +126,21 @@ export class ControlPlane {
     const DesiredChannelIds=new Set(BlueprintValue.channels.map(Spec=>ChannelMappings[Spec.key]).filter(Boolean));
     if (Mode==='REPLACE' && ProtectedChannels.size) throw new Error('Community Rules/Updates channels require an explicit reconfiguration path before REPLACE');
     if (Mode==='REPLACE'||BlueprintValue.policy?.pruneChannels) {
+      Preconditions.channelSet=SetHash(SnapshotValue.channels.map(Item=>Item.id));
       const Unmanaged=SnapshotValue.channels.filter(Item=>Mode==='REPLACE'||!DesiredChannelIds.has(Item.id));
       for (const Item of [...Unmanaged.filter(Item=>Item.type!==ChannelType.GuildCategory),...Unmanaged.filter(Item=>Item.type===ChannelType.GuildCategory)]) {
         if (ProtectedChannels.has(Item.id)) throw new Error(`Protected channel ${Item.id} prevents pruning`);
         Operations.push(OperationFor('channel','delete',undefined,Item.id));
-        Preconditions[`channel:${Item.id}`]=Structural(Item);
+        Preconditions[`channel:${Item.id}`]=Structural(Item,'channel');
       }
     }
     if (Mode==='REPLACE'||BlueprintValue.policy?.pruneRoles) {
+      Preconditions.editableRoleSet=SetHash(SnapshotValue.roles.filter(Item=>EditableRole(Item,SnapshotValue)).map(Item=>Item.id));
       for (const Item of SnapshotValue.roles) {
         if (Mode==='RECONCILE' && DesiredRoleIds.has(Item.id)) continue;
         if (!EditableRole(Item,SnapshotValue)) continue;
         Operations.push(OperationFor('role','delete',undefined,Item.id));
-        Preconditions[`role:${Item.id}`]=Structural(Item);
+        Preconditions[`role:${Item.id}`]=Structural(Item,'role');
       }
     }
     for (const Spec of BlueprintValue.roles) {
@@ -140,8 +149,14 @@ export class ControlPlane {
       if (Id && !Existing) throw new Error(`Mapped role ${Spec.key} is missing; explicit repair required`);
       if (Existing && !EditableRole(Existing,SnapshotValue)) throw new Error(`Mapped role ${Spec.key} cannot be edited`);
       if (!Id && Mode==='RECONCILE' && SnapshotValue.roles.some(Item=>Item.name===Spec.name)) throw new Error(`Role ${Spec.name} exists without a mapping; adopt its exact ID first`);
-      Operations.push(OperationFor('role',Existing?'update':'create',Spec.key,Existing?.id,Spec));
-      if (Existing) Preconditions[`role:${Existing.id}`]=Structural(Existing);
+      if (Existing) Preconditions[`role:${Existing.id}`]=Structural(Existing,'role');
+      if (!Existing||Mode==='REPLACE') {
+        Operations.push(OperationFor('role','create',Spec.key,undefined,Spec));
+        if (Mode==='RECONCILE') Preconditions[`absence:role:${encodeURIComponent(Spec.name)}`]='absent';
+      } else if (Hash(RoleState(Existing))!==Hash(DesiredRole(Spec))) {
+        Operations.push(OperationFor('role','update',Spec.key,Existing.id,Spec));
+        Preconditions[`role:${Existing.id}`]=Structural(Existing,'role');
+      }
     }
     const OrderedChannels=[...BlueprintValue.channels.filter(Item=>Item.type==='category'),...BlueprintValue.channels.filter(Item=>Item.type!=='category')];
     for (const Spec of OrderedChannels) {
@@ -149,8 +164,20 @@ export class ControlPlane {
       const Existing=Id?SnapshotValue.channels.find(Item=>Item.id===Id):undefined;
       if (Id&&!Existing) throw new Error(`Mapped channel ${Spec.key} is missing; explicit repair required`);
       if (!Id && Mode==='RECONCILE' && SnapshotValue.channels.some(Item=>Item.name===Spec.name)) throw new Error(`Channel ${Spec.name} exists without a mapping; adopt its exact ID first`);
-      Operations.push(OperationFor('channel',Existing?'update':'create',Spec.key,Existing?.id,Spec));
-      if (Existing) Preconditions[`channel:${Existing.id}`]=Structural(Existing);
+      if (Existing&&Existing.type!==ChannelTypes[Spec.type]) throw new Error(`Mapped channel ${Spec.key} has incompatible type`);
+      if (Existing) Preconditions[`channel:${Existing.id}`]=Structural(Existing,'channel');
+      if (!Existing||Mode==='REPLACE') {
+        Operations.push(OperationFor('channel','create',Spec.key,undefined,Spec));
+        if (Mode==='RECONCILE') Preconditions[`absence:channel:${encodeURIComponent(Spec.name)}`]='absent';
+      } else {
+        const DesiredParent=Spec.parent?ChannelMappings[Spec.parent]:undefined;
+        const NewRoleReferences=Spec.overwrites.some(Entry=>Entry.target!=='@everyone'&&!RoleMappings[Entry.target]);
+        const NewParent=Boolean(Spec.parent&&!DesiredParent);
+        if (NewRoleReferences||NewParent||Hash(ChannelState(Existing))!==Hash(DesiredChannel(Spec,GuildId,RoleMappings,ChannelMappings))) {
+          Operations.push(OperationFor('channel','update',Spec.key,Existing.id,Spec));
+          Preconditions[`channel:${Existing.id}`]=Structural(Existing,'channel');
+        }
+      }
     }
     if (BlueprintValue.guild?.name && SnapshotValue.guild.name!==BlueprintValue.guild.name) {
       Operations.push(OperationFor('guild','update',undefined,GuildId,{name:BlueprintValue.guild.name}));
@@ -166,29 +193,35 @@ export class ControlPlane {
     if (this.MappingHash(PlanValue.guildId)!==PlanValue.mappingHash) throw new Error('PLAN_STALE: semantic resource mappings changed after planning');
     const SnapshotValue=await this.Discord.Snapshot(PlanValue.guildId);
     for (const [Target,Expected] of Object.entries(PlanValue.preconditions)) {
+      if (Target==='channelSet') {
+        if (SetHash(SnapshotValue.channels.map(Item=>Item.id))!==Expected) throw new Error('PLAN_STALE: channel set changed after planning');
+        continue;
+      }
+      if (Target==='editableRoleSet') {
+        if (SetHash(SnapshotValue.roles.filter(Item=>EditableRole(Item,SnapshotValue)).map(Item=>Item.id))!==Expected)
+          throw new Error('PLAN_STALE: editable role set changed after planning');
+        continue;
+      }
       const [Kind,Id]=Target.split(':');
+      if (Kind==='absence') {
+        const [,Resource,EncodedName]=Target.split(':');
+        const Name=decodeURIComponent(EncodedName??'');
+        const List=Resource==='role'?SnapshotValue.roles:SnapshotValue.channels;
+        if (List.some(Item=>Item.name===Name)) throw new Error(`PLAN_STALE: ${Resource} name ${Name} appeared after planning`);
+        continue;
+      }
       const Current=Kind==='role'?SnapshotValue.roles.find(Item=>Item.id===Id):Kind==='channel'?SnapshotValue.channels.find(Item=>Item.id===Id):{name:SnapshotValue.guild.name};
-      const Actual=Kind==='guild'?Hash(Current):Structural(Current as DiscordRole|DiscordChannel|undefined);
+      const Actual=Kind==='guild'?Hash(Current):Structural(Current as DiscordRole|DiscordChannel|undefined,Kind as 'role'|'channel');
       if (Actual!==Expected) throw new Error(`PLAN_STALE: ${Target} changed after planning`);
     }
   }
-  private async ChannelBody(GuildId:string,Spec:Channel,Existing?:DiscordChannel):Promise<Record<string,unknown>> {
-    const ParentId=Spec.parent?this.Store.GetMapping(GuildId,'channel',Spec.parent):undefined;
-    if (Spec.parent&&!ParentId) throw new Error(`Category ${Spec.parent} is not mapped`);
-    const Overwrites=Spec.overwrites.map(Entry=>{
-      const Id=Entry.target==='@everyone'?GuildId:this.Store.GetMapping(GuildId,'role',Entry.target);
-      if (!Id) throw new Error(`Role ${Entry.target} is not mapped`);
-      return {id:Id,type:0,allow:Bits(Entry.allow),deny:Bits(Entry.deny)};
-    });
-    const Body:Record<string,unknown>={name:Spec.name,type:ChannelTypes[Spec.type]};
-    if (!Existing||Spec.parent!==undefined) Body.parent_id=ParentId??null;
-    if (!Existing) Body.permission_overwrites=Overwrites;
-    else if (Overwrites.length) {
-      const Replaced=new Set(Overwrites.map(Item=>Item.id));
-      Body.permission_overwrites=[...(Existing.permission_overwrites??[]).filter(Item=>!Replaced.has(Item.id)),...Overwrites];
-    }
-    if (Spec.topic!==undefined) Body.topic=Spec.topic;
-    if (Spec.nsfw!==undefined) Body.nsfw=Spec.nsfw;
+  private async ChannelBody(GuildId:string,Spec:Channel):Promise<Record<string,unknown>> {
+    const Desired=DesiredChannel(Spec,GuildId,this.Store.GetMappings(GuildId,'role'),this.Store.GetMappings(GuildId,'channel'));
+    const Body:Record<string,unknown>={name:Desired.name,type:Desired.type,parent_id:Desired.parent_id,
+      permission_overwrites:Desired.permission_overwrites};
+    if (Desired.type===ChannelType.GuildCategory) delete Body.parent_id;
+    if ([ChannelType.GuildText,ChannelType.GuildAnnouncement,ChannelType.GuildForum,ChannelType.GuildMedia].includes(Desired.type)) Body.topic=Desired.topic;
+    if (Desired.type!==ChannelType.GuildCategory&&Desired.type!==ChannelType.GuildStageVoice) Body.nsfw=Desired.nsfw;
     return Body;
   }
   private async Execute(PlanValue:Plan,OperationValue:Operation):Promise<void> {
@@ -208,8 +241,7 @@ export class ControlPlane {
         :await this.Discord.Patch<{id:string}>(`/guilds/${GuildId}/roles/${OperationValue.targetId}`,Body,Reason);
       OperationValue.resultId=Result.id;
     } else {
-      const Existing=OperationValue.action==='update'?await this.Discord.Get<DiscordChannel>(`/channels/${OperationValue.targetId}`):undefined;
-      const Body=await this.ChannelBody(GuildId,OperationValue.desired as Channel,Existing);
+      const Body=await this.ChannelBody(GuildId,OperationValue.desired as Channel);
       if (OperationValue.action==='update') delete Body.type;
       const Result=OperationValue.action==='create'
         ?await this.Discord.Post<{id:string}>(`/guilds/${GuildId}/channels`,Body,Reason)
@@ -219,15 +251,18 @@ export class ControlPlane {
     if (OperationValue.key && OperationValue.resultId) this.Store.SetMapping(GuildId,OperationValue.resource,OperationValue.key,OperationValue.resultId);
   }
   async ApplyPlan(PlanId:string,Actor:string):Promise<Plan> {
-    const PlanValue=this.Store.GetPlan(PlanId);
-    if (!PlanValue) throw new Error('Plan not found');
-    if (PlanValue.actor!==Actor) throw new Error('Plan actor mismatch');
-    if (PlanValue.status==='succeeded') return PlanValue;
-    if (PlanValue.status==='uncertain'||PlanValue.operations.some(Item=>Item.state==='running')) throw new Error('Plan has an uncertain operation; inspect Discord and adopt/resolve it manually');
-    if (this.Applying.has(PlanValue.guildId)||this.Store.HasActivePlan(PlanValue.guildId,PlanId)) throw new Error('Another plan is active for this guild');
-    this.Applying.add(PlanValue.guildId);
-    try {
-      if (PlanValue.status==='planned') await this.CheckPreconditions(PlanValue);
+    const Initial=this.Store.GetPlan(PlanId);
+    if (!Initial) throw new Error('Plan not found');
+    return this.WithGuildMutation(Initial.guildId,async()=>{
+      const PlanValue=this.Store.GetPlan(PlanId);
+      if (!PlanValue) throw new Error('Plan not found');
+      if (PlanValue.actor!==Actor) throw new Error('Plan actor mismatch');
+      if (PlanValue.status==='succeeded') return PlanValue;
+      if (PlanValue.status==='abandoned') throw new Error('Abandoned plan is terminal');
+      if (PlanValue.status==='failed') throw new Error('Failed plans are terminal; create a fresh plan');
+      if (PlanValue.status==='uncertain'||PlanValue.operations.some(Item=>Item.state==='running')) throw new Error('Plan has an uncertain operation; inspect Discord and adopt/resolve it manually');
+      if (PlanValue.status==='running') throw new Error('Interrupted running plan requires inspection and a fresh plan');
+      await this.CheckPreconditions(PlanValue);
       PlanValue.status='running';this.Store.SavePlan(PlanValue);
       for (const Item of PlanValue.operations) {
         if (Item.state==='succeeded'||Item.state==='skipped') continue;
@@ -240,7 +275,6 @@ export class ControlPlane {
           throw Cause;
         }
       }
-      PlanValue.status='succeeded';this.Store.SavePlan(PlanValue);
       let Verification:Awaited<ReturnType<ControlPlane['VerifyServer']>>;
       try {Verification=await this.VerifyServer(PlanId);}
       catch (Cause) {
@@ -251,8 +285,9 @@ export class ControlPlane {
         PlanValue.status='failed';this.Store.SavePlan(PlanValue);
         throw new Error(`Verification failed: ${Verification.issues.join('; ')}`);
       }
+      PlanValue.status='succeeded';this.Store.SavePlan(PlanValue);
       return PlanValue;
-    } finally {this.Applying.delete(PlanValue.guildId);}
+    },PlanId);
   }
   async VerifyServer(PlanId:string):Promise<{planId:string;guildId:string;status:string;verified:boolean;issues:string[];snapshot:Snapshot}> {
     const PlanValue=this.Store.GetPlan(PlanId);
@@ -267,46 +302,27 @@ export class ControlPlane {
       } else if (Item.state==='succeeded') {
         const Current=List.find(Entry=>Entry.id===(Item.resultId??Item.targetId));
         const Desired=Item.desired as Role|Channel;
-        if (!Current||Current.name!==Desired.name) {
+        if (!Current) {
           Issues.push(`${Item.resource} ${Item.key??Item.targetId} mutation not observed`);continue;
         }
-        if (Item.resource==='role'&&(Current as DiscordRole).permissions!==Bits((Desired as Role).permissions))
-          Issues.push(`Role ${Item.key??Item.targetId} permissions not observed`);
-        if (Item.resource==='channel') {
-          const ChannelDesired=Desired as Channel;
-          const ChannelCurrent=Current as DiscordChannel;
-          if (ChannelCurrent.type!==ChannelTypes[ChannelDesired.type]) Issues.push(`Channel ${Item.key??Item.targetId} type not observed`);
-          if (ChannelDesired.parent!==undefined) {
-            const ParentId=this.Store.GetMapping(PlanValue.guildId,'channel',ChannelDesired.parent);
-            if ((ChannelCurrent.parent_id??null)!==(ParentId??null)) Issues.push(`Channel ${Item.key??Item.targetId} parent not observed`);
-          }
-          for (const Overwrite of ChannelDesired.overwrites) {
-            const Target=Overwrite.target==='@everyone'?PlanValue.guildId:this.Store.GetMapping(PlanValue.guildId,'role',Overwrite.target);
-            const Actual=ChannelCurrent.permission_overwrites?.find(Entry=>Entry.id===Target);
-            if (!Actual||Actual.allow!==Bits(Overwrite.allow)||Actual.deny!==Bits(Overwrite.deny))
-              Issues.push(`Channel ${Item.key??Item.targetId} overwrite ${Overwrite.target} not observed`);
-          }
-        }
+        const Actual=Item.resource==='role'?RoleState(Current as DiscordRole):ChannelState(Current as DiscordChannel);
+        const Wanted=Item.resource==='role'?DesiredRole(Desired as Role):DesiredChannel(Desired as Channel,PlanValue.guildId,
+          this.Store.GetMappings(PlanValue.guildId,'role'),this.Store.GetMappings(PlanValue.guildId,'channel'));
+        if (Hash(Actual)!==Hash(Wanted)) Issues.push(`${Item.resource} ${Item.key??Item.targetId} state does not match`);
       }
     }
     for (const Spec of PlanValue.blueprint.roles) {
       const Id=this.Store.GetMapping(PlanValue.guildId,'role',Spec.key);
       const Current=SnapshotValue.roles.find(Item=>Item.id===Id);
-      if (!Current||Current.name!==Spec.name||Current.permissions!==Bits(Spec.permissions)) Issues.push(`Role ${Spec.key} does not match`);
+      if (!Current||Hash(RoleState(Current))!==Hash(DesiredRole(Spec))) Issues.push(`Role ${Spec.key} does not match`);
     }
     for (const Spec of PlanValue.blueprint.channels) {
       const Id=this.Store.GetMapping(PlanValue.guildId,'channel',Spec.key);
       const Current=SnapshotValue.channels.find(Item=>Item.id===Id);
-      const Parent=Spec.parent?this.Store.GetMapping(PlanValue.guildId,'channel',Spec.parent):undefined;
-      if (!Current||Current.name!==Spec.name||Current.type!==ChannelTypes[Spec.type]||(Spec.parent!==undefined&&(Current.parent_id??null)!==(Parent??null))) {
-        Issues.push(`Channel ${Spec.key} does not match`);continue;
-      }
-      for (const Overwrite of Spec.overwrites) {
-        const Target=Overwrite.target==='@everyone'?PlanValue.guildId:this.Store.GetMapping(PlanValue.guildId,'role',Overwrite.target);
-        const Actual=Current.permission_overwrites?.find(Item=>Item.id===Target);
-        if (!Actual||Actual.allow!==Bits(Overwrite.allow)||Actual.deny!==Bits(Overwrite.deny)) Issues.push(`Channel ${Spec.key} overwrite ${Overwrite.target} does not match`);
-      }
+      const Wanted=DesiredChannel(Spec,PlanValue.guildId,this.Store.GetMappings(PlanValue.guildId,'role'),this.Store.GetMappings(PlanValue.guildId,'channel'));
+      if (!Current||Hash(ChannelState(Current))!==Hash(Wanted)) Issues.push(`Channel ${Spec.key} does not match`);
     }
+    if (PlanValue.blueprint.guild?.name&&SnapshotValue.guild.name!==PlanValue.blueprint.guild.name) Issues.push('Guild name does not match');
     if (PlanValue.mode==='REPLACE'||PlanValue.blueprint.policy?.pruneChannels) {
       const Wanted=new Set(PlanValue.blueprint.channels.map(Spec=>this.Store.GetMapping(PlanValue.guildId,'channel',Spec.key)));
       for (const ChannelValue of SnapshotValue.channels) if (!Wanted.has(ChannelValue.id)) Issues.push(`Unexpected channel ${ChannelValue.id}`);
@@ -315,46 +331,57 @@ export class ControlPlane {
       const Wanted=new Set(PlanValue.blueprint.roles.map(Spec=>this.Store.GetMapping(PlanValue.guildId,'role',Spec.key)));
       for (const RoleValue of SnapshotValue.roles) if (EditableRole(RoleValue,SnapshotValue)&&!Wanted.has(RoleValue.id)) Issues.push(`Unexpected mutable role ${RoleValue.id}`);
     }
-    return {planId:PlanId,guildId:PlanValue.guildId,status:PlanValue.status,verified:PlanValue.status==='succeeded'&&Issues.length===0,issues:Issues,snapshot:SnapshotValue};
+    return {planId:PlanId,guildId:PlanValue.guildId,status:PlanValue.status,
+      verified:PlanValue.operations.every(Item=>Item.state==='succeeded'||Item.state==='skipped')&&Issues.length===0,issues:Issues,snapshot:SnapshotValue};
   }
   async AddMemberRole(GuildId:string,UserId:string,RoleId:string,Actor:string):Promise<void> {
     Snowflake.parse(GuildId);Snowflake.parse(UserId);Snowflake.parse(RoleId);
-    const SnapshotValue=await this.Discord.Snapshot(GuildId);
-    const RoleValue=SnapshotValue.roles.find(Item=>Item.id===RoleId);
-    if (!RoleValue||!EditableRole(RoleValue,SnapshotValue)) throw new Error('Role cannot be assigned by this bot');
-    await this.RunDirect(GuildId,Actor,'add-role',UserId,Id=>this.Discord.RequestPut(`/guilds/${GuildId}/members/${UserId}/roles/${RoleId}`,`DiscordControl action=${Id} actor=${Actor} add-role`));
+    await this.RunDirect(GuildId,Actor,'add-role',UserId,async()=>{
+      const SnapshotValue=await this.Discord.Snapshot(GuildId);
+      if (!HasPermission(SnapshotValue,'ManageRoles')) throw new Error('Bot lacks MANAGE_ROLES');
+      const RoleValue=SnapshotValue.roles.find(Item=>Item.id===RoleId);
+      if (!RoleValue||!EditableRole(RoleValue,SnapshotValue)) throw new Error('Role cannot be assigned by this bot');
+    },Id=>this.Discord.RequestPut(`/guilds/${GuildId}/members/${UserId}/roles/${RoleId}`,`DiscordControl action=${Id} actor=${Actor} add-role`));
   }
   async RemoveMemberRole(GuildId:string,UserId:string,RoleId:string,Actor:string):Promise<void> {
     Snowflake.parse(GuildId);Snowflake.parse(UserId);Snowflake.parse(RoleId);
-    const SnapshotValue=await this.Discord.Snapshot(GuildId);
-    const RoleValue=SnapshotValue.roles.find(Item=>Item.id===RoleId);
-    if (!RoleValue||!EditableRole(RoleValue,SnapshotValue)) throw new Error('Role cannot be removed by this bot');
-    await this.RunDirect(GuildId,Actor,'remove-role',UserId,Id=>this.Discord.Delete(`/guilds/${GuildId}/members/${UserId}/roles/${RoleId}`,`DiscordControl action=${Id} actor=${Actor} remove-role`));
+    await this.RunDirect(GuildId,Actor,'remove-role',UserId,async()=>{
+      const SnapshotValue=await this.Discord.Snapshot(GuildId);
+      if (!HasPermission(SnapshotValue,'ManageRoles')) throw new Error('Bot lacks MANAGE_ROLES');
+      const RoleValue=SnapshotValue.roles.find(Item=>Item.id===RoleId);
+      if (!RoleValue||!EditableRole(RoleValue,SnapshotValue)) throw new Error('Role cannot be removed by this bot');
+    },Id=>this.Discord.Delete(`/guilds/${GuildId}/members/${UserId}/roles/${RoleId}`,`DiscordControl action=${Id} actor=${Actor} remove-role`));
   }
   async KickMember(GuildId:string,UserId:string,Actor:string):Promise<void> {
     Snowflake.parse(GuildId);Snowflake.parse(UserId);
-    const SnapshotValue=await this.Discord.Snapshot(GuildId);
-    await this.CheckMemberHierarchy(SnapshotValue,UserId);
-    await this.RunDirect(GuildId,Actor,'kick-member',UserId,Id=>this.Discord.Delete(`/guilds/${GuildId}/members/${UserId}`,`DiscordControl action=${Id} actor=${Actor} kick-member`));
+    await this.RunDirect(GuildId,Actor,'kick-member',UserId,async()=>{
+      const SnapshotValue=await this.Discord.Snapshot(GuildId);
+      if (!HasPermission(SnapshotValue,'KickMembers')) throw new Error('Bot lacks KICK_MEMBERS');
+      await this.CheckMemberHierarchy(SnapshotValue,UserId);
+    },Id=>this.Discord.Delete(`/guilds/${GuildId}/members/${UserId}`,`DiscordControl action=${Id} actor=${Actor} kick-member`));
   }
   async BanMember(GuildId:string,UserId:string,Actor:string,DeleteMessageSeconds=0):Promise<void> {
     Snowflake.parse(GuildId);Snowflake.parse(UserId);
     if (DeleteMessageSeconds<0||DeleteMessageSeconds>604800) throw new Error('deleteMessageSeconds out of range');
-    const SnapshotValue=await this.Discord.Snapshot(GuildId);
-    await this.CheckMemberHierarchy(SnapshotValue,UserId,true);
-    await this.RunDirect(GuildId,Actor,'ban-member',UserId,Id=>this.Discord.RequestPut(`/guilds/${GuildId}/bans/${UserId}`,`DiscordControl action=${Id} actor=${Actor} ban-member`,{delete_message_seconds:DeleteMessageSeconds}));
+    await this.RunDirect(GuildId,Actor,'ban-member',UserId,async()=>{
+      const SnapshotValue=await this.Discord.Snapshot(GuildId);
+      if (!HasPermission(SnapshotValue,'BanMembers')) throw new Error('Bot lacks BAN_MEMBERS');
+      await this.CheckMemberHierarchy(SnapshotValue,UserId,true);
+    },Id=>this.Discord.RequestPut(`/guilds/${GuildId}/bans/${UserId}`,`DiscordControl action=${Id} actor=${Actor} ban-member`,{delete_message_seconds:DeleteMessageSeconds}));
   }
   async SetRolePositions(GuildId:string,Positions:{roleId:string;position:number}[],Actor:string):Promise<void> {
     Snowflake.parse(GuildId);
     if (!Positions.length||new Set(Positions.map(Item=>Item.roleId)).size!==Positions.length) throw new Error('Role positions must be nonempty and unique');
-    const SnapshotValue=await this.Discord.Snapshot(GuildId);
-    for (const Item of Positions) {
-      Snowflake.parse(Item.roleId);
-      const RoleValue=SnapshotValue.roles.find(RoleEntry=>RoleEntry.id===Item.roleId);
-      if (!RoleValue||!EditableRole(RoleValue,SnapshotValue)||Item.position<1||Item.position>=SnapshotValue.capabilities.highestRolePosition)
-        throw new Error(`Role ${Item.roleId} cannot be moved to ${Item.position}`);
-    }
-    await this.RunDirect(GuildId,Actor,'set-role-positions',GuildId,async Id=>{
+    await this.RunDirect(GuildId,Actor,'set-role-positions',GuildId,async()=>{
+      const SnapshotValue=await this.Discord.Snapshot(GuildId);
+      if (!HasPermission(SnapshotValue,'ManageRoles')) throw new Error('Bot lacks MANAGE_ROLES');
+      for (const Item of Positions) {
+        Snowflake.parse(Item.roleId);
+        const RoleValue=SnapshotValue.roles.find(RoleEntry=>RoleEntry.id===Item.roleId);
+        if (!RoleValue||!EditableRole(RoleValue,SnapshotValue)||Item.position<1||Item.position>=SnapshotValue.capabilities.highestRolePosition)
+          throw new Error(`Role ${Item.roleId} cannot be moved to ${Item.position}`);
+      }
+    },async Id=>{
       await this.Discord.Patch(`/guilds/${GuildId}/roles`,Positions.map(Item=>({id:Item.roleId,position:Item.position})),
         `DiscordControl action=${Id} actor=${Actor} set-role-positions`);
       const After=await this.Discord.Snapshot(GuildId);
@@ -370,15 +397,35 @@ export class ControlPlane {
     const Highest=Math.max(0,...SnapshotValue.roles.filter(RoleValue=>Member.roles.includes(RoleValue.id)).map(RoleValue=>RoleValue.position));
     if (Highest>=SnapshotValue.capabilities.highestRolePosition) throw new Error('Target member is at or above the bot role hierarchy');
   }
-  private async RunDirect(GuildId:string,Actor:string,Kind:string,TargetId:string,Action:(Id:string)=>Promise<void>):Promise<void> {
-    if (this.Applying.has(GuildId)||this.Store.HasActivePlan(GuildId)) throw new Error('A plan is active for this guild');
-    const Id=`action_${randomUUID()}`;
-    this.Store.RecordAction(Id,GuildId,Actor,Kind,TargetId,'running');
-    try {await Action(Id);this.Store.RecordAction(Id,GuildId,Actor,Kind,TargetId,'succeeded');}
-    catch (Cause) {
-      const State=Cause instanceof DiscordError&&Cause.Status>=400&&Cause.Status<500?'failed':'uncertain';
-      this.Store.RecordAction(Id,GuildId,Actor,Kind,TargetId,State,Cause instanceof Error?Cause.message:String(Cause));
-      throw Cause;
-    }
+  private async RunDirect(GuildId:string,Actor:string,Kind:string,TargetId:string,
+    Preflight:()=>Promise<void>,Action:(Id:string)=>Promise<void>):Promise<void> {
+    await this.WithGuildMutation(GuildId,async()=>{
+      await Preflight();
+      const Id=`action_${randomUUID()}`;
+      this.Store.RecordAction(Id,GuildId,Actor,Kind,TargetId,'running');
+      try {await Action(Id);this.Store.RecordAction(Id,GuildId,Actor,Kind,TargetId,'succeeded');}
+      catch (Cause) {
+        const State=Cause instanceof DiscordError&&Cause.Status>=400&&Cause.Status<500?'failed':'uncertain';
+        this.Store.RecordAction(Id,GuildId,Actor,Kind,TargetId,State,Cause instanceof Error?Cause.message:String(Cause));
+        throw new Error(`${Cause instanceof Error?Cause.message:String(Cause)} (actionId=${Id}, state=${State})`,{cause:Cause});
+      }
+    });
+  }
+  GetUncertainActions(GuildId:string) {Snowflake.parse(GuildId);return this.Store.ListUncertainActions(GuildId);}
+  async ResolveUncertainAction(ActionId:string,Actor:string):Promise<void> {
+    const Action=this.Store.GetAction(ActionId);
+    if (!Action) throw new Error('Action not found');
+    await this.WithGuildMutation(Action.guild_id,async()=>this.Store.ResolveAction(ActionId,Actor),undefined,true);
+  }
+  async AbandonPlan(PlanId:string,Actor:string):Promise<Plan> {
+    const Initial=this.Store.GetPlan(PlanId);
+    if (!Initial||Initial.actor!==Actor) throw new Error('Plan not found for actor');
+    return this.WithGuildMutation(Initial.guildId,async()=>{
+      const PlanValue=this.Store.GetPlan(PlanId);
+      if (!PlanValue||PlanValue.actor!==Actor) throw new Error('Plan not found for actor');
+      if (!['running','uncertain','failed','planned'].includes(PlanValue.status)) throw new Error('Plan cannot be abandoned');
+      PlanValue.status='abandoned';this.Store.SavePlan(PlanValue);
+      return PlanValue;
+    },PlanId);
   }
 }
