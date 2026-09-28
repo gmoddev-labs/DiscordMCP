@@ -80,9 +80,18 @@ export async function Dispatch(Control:ControlPlane,Name:CallName,Raw:unknown,Ac
     case 'PlanResourceMutation': {const A=Calls.PlanResourceMutation.parse(Raw);if (A.action==='delete') Control.Assistant.Require(Actor,A.guildId,'guild.structure.replace');return Control.PlanResourceMutation(A.guildId,A.kind,A.action,ActorId,A.spec,A.targetId);}
     case 'PlanWipeChannels': {const A=Calls.PlanWipeChannels.parse(Raw);return Control.PlanServer(A.guildId,{version:1,roles:[],channels:[],policy:{pruneChannels:true,pruneRoles:false}},'RECONCILE',ActorId);}
     case 'PlanWipeRoles': {const A=Calls.PlanWipeRoles.parse(Raw);return Control.PlanServer(A.guildId,{version:1,roles:[],channels:[],policy:{pruneChannels:false,pruneRoles:true}},'RECONCILE',ActorId);}
-    case 'ApplyPlan': {const A=Calls.ApplyPlan.parse(Raw);const Plan=Control.Store.GetPlan(A.planId);if (Plan) Control.Assistant.Require(Actor,Plan.guildId,'guild.structure.apply');return Control.ApplyPlan(A.planId,ActorId);}
-    case 'AbandonPlan': {const A=Calls.AbandonPlan.parse(Raw);const Plan=Control.Store.GetPlan(A.planId);if (Plan) Control.Assistant.Require(Actor,Plan.guildId,'guild.structure.apply');return Control.AbandonPlan(A.planId,ActorId);}
-    case 'ResolveUncertainAction': {const A=Calls.ResolveUncertainAction.parse(Raw);const Action=Control.Store.GetAction(A.actionId);if (Action) Control.Assistant.Require(Actor,Action.guild_id,'guild.structure.apply');await Control.ResolveUncertainAction(A.actionId,ActorId);return {ok:true};}
+    case 'ApplyPlan': {const A=Calls.ApplyPlan.parse(Raw);const Plan=Control.Store.GetPlan(A.planId);
+      if (Plan) Control.Assistant.Require(Actor,Plan.guildId,'guild.structure.apply');
+      const Owner=Plan&&!Plan.actorIdentity&&Actor.kind!=='discord-user'&&Plan.actor===Actor.displayName?Plan.actor:ActorId;
+      return Control.ApplyPlan(A.planId,Owner);}
+    case 'AbandonPlan': {const A=Calls.AbandonPlan.parse(Raw);const Plan=Control.Store.GetPlan(A.planId);
+      if (Plan) Control.Assistant.Require(Actor,Plan.guildId,'guild.structure.apply');
+      const Owner=Plan&&!Plan.actorIdentity&&Actor.kind!=='discord-user'&&Plan.actor===Actor.displayName?Plan.actor:ActorId;
+      return Control.AbandonPlan(A.planId,Owner);}
+    case 'ResolveUncertainAction': {const A=Calls.ResolveUncertainAction.parse(Raw);const Action=Control.Store.GetAction(A.actionId);
+      if (Action) Control.Assistant.Require(Actor,Action.guild_id,'guild.structure.apply');
+      const Owner=Action&&Actor.kind!=='discord-user'&&Action.actor===Actor.displayName?Action.actor:ActorId;
+      await Control.ResolveUncertainAction(A.actionId,Owner);return {ok:true};}
     case 'GetUncertainActions': {const A=Calls.GetUncertainActions.parse(Raw);return Control.GetUncertainActions(A.guildId);}
     case 'VerifyServer': {const A=Calls.VerifyServer.parse(Raw);return Control.VerifyServer(A.planId);}
     case 'AddMemberRole': {const A=Calls.AddMemberRole.parse(Raw);await Control.AddMemberRole(A.guildId,A.userId,A.roleId,ActorId);return {ok:true};}

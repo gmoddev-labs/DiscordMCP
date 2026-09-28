@@ -162,3 +162,21 @@ test('actor identity is persisted on structural plan records',async()=>{
       (Cause:unknown)=>Cause instanceof OperationalError&&Cause.code==='NOT_AUTHORIZED');
   } finally {F.Close();}
 });
+
+test('authenticated local operator can finish a plan saved before actor identities',async()=>{
+  const F=Fixture();
+  const State:Snapshot={guildId:GuildId,capturedAt:new Date().toISOString(),
+    completeness:{channels:'complete',threads:'none',members:'omitted',messages:'omitted'},omissions:[],
+    capabilities:{permissions:['Administrator'],highestRolePosition:10,memberList:false},
+    guild:{id:GuildId,name:'Test',owner_id:UserId},roles:[],channels:[]};
+  const Control=new ControlPlane({Snapshot:async()=>State,OnEvent:()=>()=>{}} as unknown as DiscordAdapter,F.Storage);
+  try {
+    const Legacy=await Control.PlanServer(GuildId,{version:1},'RECONCILE','aiden');
+    const LegacyOperator={...Owner,displayName:'aiden'};
+    const Applied=await Dispatch(Control,'ApplyPlan',{planId:Legacy.id},LegacyOperator) as {status:string};
+    assert.equal(Applied.status,'succeeded');
+    F.Storage.RecordAction('action_legacy',GuildId,'aiden','kick-member',UserId,'uncertain');
+    assert.deepEqual(await Dispatch(Control,'ResolveUncertainAction',{actionId:'action_legacy'},LegacyOperator),{ok:true});
+    assert.equal(F.Storage.GetAction('action_legacy')?.state,'resolved');
+  } finally {F.Close();}
+});
