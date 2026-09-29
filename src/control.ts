@@ -399,13 +399,13 @@ export class ControlPlane {
     const Highest=Math.max(0,...SnapshotValue.roles.filter(RoleValue=>Member.roles.includes(RoleValue.id)).map(RoleValue=>RoleValue.position));
     if (Highest>=SnapshotValue.capabilities.highestRolePosition) throw new Error('Target member is at or above the bot role hierarchy');
   }
-  private async RunDirect(GuildId:string,Actor:string,Kind:string,TargetId:string,
-    Preflight:()=>Promise<void>,Action:(Id:string)=>Promise<void>):Promise<void> {
-    await this.WithGuildMutation(GuildId,async()=>{
+  async RunDirect<T>(GuildId:string,Actor:string,Kind:string,TargetId:string,
+    Preflight:()=>Promise<void>,Action:(Id:string)=>Promise<T>):Promise<T> {
+    return this.WithGuildMutation(GuildId,async()=>{
       await Preflight();
       const Id=`action_${randomUUID()}`;
       this.Store.RecordAction(Id,GuildId,Actor,Kind,TargetId,'running');
-      try {await Action(Id);this.Store.RecordAction(Id,GuildId,Actor,Kind,TargetId,'succeeded');}
+      try {const Result=await Action(Id);this.Store.RecordAction(Id,GuildId,Actor,Kind,TargetId,'succeeded');return Result;}
       catch (Cause) {
         const State=Cause instanceof DiscordError&&Cause.Status>=400&&Cause.Status<500?'failed':'uncertain';
         this.Store.RecordAction(Id,GuildId,Actor,Kind,TargetId,State,Cause instanceof Error?Cause.message:String(Cause));

@@ -64,6 +64,11 @@ export class DiscordAdapter {
   OnEvent(Handler:(EventValue:OperationalEvent)=>void|Promise<void>):()=>void {return this.Events.Subscribe(Handler);}
   async Start(): Promise<void> { await this.Client.login(this.Token); }
   Stop(): void { this.Client.destroy(); }
+  GetBotUserId():string {
+    const Id=this.Client.user?.id;
+    if(!Id) throw new Error('Discord gateway has no authenticated bot user');
+    return Id;
+  }
   GetActiveServers(): {id:string;name:string;available:boolean;memberCount:number}[] {
     return this.Client.guilds.cache.map(Guild => ({id:Guild.id,name:Guild.name,available:Guild.available,memberCount:Guild.memberCount}));
   }
@@ -152,29 +157,34 @@ export class DiscordAdapter {
     }
     return Members;
   }
-  private async CheckChannel(GuildId:string,ChannelId:string):Promise<void> {
-    Snowflake.parse(GuildId);Snowflake.parse(ChannelId);
+  RequireGuild(GuildId:string):void {
+    Snowflake.parse(GuildId);
     if (!this.Client.guilds.cache.has(GuildId)) throw new Error('Bot is not in the exact requested guild');
+  }
+  async RequireGuildChannel(GuildId:string,ChannelId:string):Promise<DiscordChannel> {
+    Snowflake.parse(GuildId);Snowflake.parse(ChannelId);
+    this.RequireGuild(GuildId);
     const Channel=await this.Get<DiscordChannel>(`/channels/${ChannelId}`);
     if (Channel.guild_id!==GuildId) throw new Error('Channel does not belong to the exact requested guild');
+    return Channel;
   }
-  private MessageRecord(GuildId:string,Value:DiscordMessage):MessageRecord {
+  ProjectMessage(GuildId:string,Value:DiscordMessage):MessageRecord {
     return {id:Value.id,guildId:GuildId,channelId:Value.channel_id,authorId:Value.author.id,content:Value.content,
       createdAt:Value.timestamp,editedAt:Value.edited_timestamp??undefined,type:Value.type,
       attachments:(Value.attachments??[]).map(Item=>({id:Item.id,filename:Item.filename,size:Item.size,url:Item.url}))};
   }
   async GetMessage(GuildId:string,ChannelId:string,MessageId:string):Promise<{message:MessageRecord;completeness:'exact-fetch'}> {
-    Snowflake.parse(MessageId);await this.CheckChannel(GuildId,ChannelId);
+    Snowflake.parse(MessageId);await this.RequireGuildChannel(GuildId,ChannelId);
     const Message=await this.Get<DiscordMessage>(`/channels/${ChannelId}/messages/${MessageId}`);
-    return {message:this.MessageRecord(GuildId,Message),completeness:'exact-fetch'};
+    return {message:this.ProjectMessage(GuildId,Message),completeness:'exact-fetch'};
   }
   async GetRecentMessages(GuildId:string,ChannelId:string,Limit:number,Before?:string):Promise<{
     messages:MessageRecord[];nextCursor?:string;limit:number;completeness:'bounded-fetch'}> {
     if (Before) Snowflake.parse(Before);
-    await this.CheckChannel(GuildId,ChannelId);
+    await this.RequireGuildChannel(GuildId,ChannelId);
     const Query=`?limit=${Limit}${Before?`&before=${Before}`:''}`;
     const Messages=await this.Get<DiscordMessage[]>(`/channels/${ChannelId}/messages${Query}`);
-    return {messages:Messages.map(Item=>this.MessageRecord(GuildId,Item)),
+    return {messages:Messages.map(Item=>this.ProjectMessage(GuildId,Item)),
       nextCursor:Messages.length===Limit?Messages.at(-1)?.id:undefined,limit:Limit,completeness:'bounded-fetch'};
   }
   async GetAuditEvents(GuildId:string,Limit:number,Before?:string):Promise<{

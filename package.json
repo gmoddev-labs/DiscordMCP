@@ -6,7 +6,7 @@
     "dev": "tsx src/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
-    "test": "node --import tsx --test tests/control.test.ts tests/adapter.test.ts tests/http.test.ts tests/assistant.test.ts"
+    "test": "node --import tsx --test tests/adapter.test.ts tests/assistant.test.ts tests/control.test.ts tests/http.test.ts tests/registry.test.ts"
   },
   "keywords": [],
   "author": "",

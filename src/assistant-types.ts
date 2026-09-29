@@ -1,7 +1,8 @@
 export type ActorIdentity={id:string;kind:'local-mcp'|'local-http'|'discord-user'|'system';externalId?:string;displayName?:string};
 export type Capability='guild.read'|'guild.structure.plan'|'guild.structure.apply'|'guild.structure.replace'|
   'messages.read'|'members.inspect'|'moderation.kick'|'moderation.ban'|'roles.assign'|
-  'notifications.read'|'notifications.create'|'notifications.acknowledge'|'activity.read'|'audit.read';
+  'notifications.read'|'notifications.create'|'notifications.acknowledge'|'activity.read'|'audit.read'|
+  'messages.write'|'messages.manage'|'reactions.write'|'threads.manage'|'invites.manage';
 export type OperationalEvent={id:string;guildId:string;observedAt:string;type:
   'message.created'|'message.updated'|'message.deleted'|'member.joined'|'member.left'|'member.updated'|
   'channel.created'|'channel.updated'|'channel.deleted'|'role.created'|'role.updated'|'role.deleted'|
