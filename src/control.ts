@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { ChannelType, PermissionFlagsBits } from 'discord.js';
-import { BlueprintSchema, ChannelSpec, RoleSpec, Snowflake, type Channel, type Operation, type Plan, type Role } from './types.js';
+import { BlueprintSchema, ChannelSpec, RoleSpec, Snowflake, type Channel, type Operation, type Plan, type Role, type GuildDesired } from './types.js';
 import { DiscordAdapter, DiscordError, type DiscordChannel, type DiscordRole, type DiscordMember, type Snapshot } from './discord.js';
 import { Store } from './store.js';
-import { Bits, ChannelState, ChannelTypes, DesiredChannel, DesiredRole, Hash, RoleState, SetHash, Structural } from './structural.js';
+import { Bits, ChannelState, ChannelTypes, DesiredChannel, DesiredGuild, DesiredRole, GuildState, Hash, RoleState, SetHash, Structural } from './structural.js';
+import {ChannelSettingsBody} from './channel-settings.js';
 import {Assistant} from './assistant.js';
 
 function RoleBody(Spec:Role):Record<string,unknown> {
@@ -76,6 +77,8 @@ export class ControlPlane {
         Bits(Overwrite.allow);Bits(Overwrite.deny);
         if (Overwrite.target!=='@everyone'&&!this.Store.GetMapping(GuildId,'role',Overwrite.target)) throw new Error(`Overwrite role ${Overwrite.target} is not mapped`);
       }
+      const Current=TargetId?SnapshotValue.channels.find(Item=>Item.id===TargetId):undefined;
+      ChannelSettingsBody(ChannelTypes[ChannelSpecValue.type],ChannelSpecValue,Current);
     }
     const List=Kind==='role'?SnapshotValue.roles:SnapshotValue.channels;
     const Existing=TargetId?List.find(Item=>Item.id===TargetId):undefined;
@@ -155,7 +158,7 @@ export class ControlPlane {
       if (!Existing||Mode==='REPLACE') {
         Operations.push(OperationFor('role','create',Spec.key,undefined,Spec));
         if (Mode==='RECONCILE') Preconditions[`absence:role:${encodeURIComponent(Spec.name)}`]='absent';
-      } else if (Hash(RoleState(Existing))!==Hash(DesiredRole(Spec))) {
+      } else if (Hash(RoleState(Existing,Spec))!==Hash(DesiredRole(Spec))) {
         Operations.push(OperationFor('role','update',Spec.key,Existing.id,Spec));
         Preconditions[`role:${Existing.id}`]=Structural(Existing,'role');
       }
@@ -175,15 +178,35 @@ export class ControlPlane {
         const DesiredParent=Spec.parent?ChannelMappings[Spec.parent]:undefined;
         const NewRoleReferences=Spec.overwrites.some(Entry=>Entry.target!=='@everyone'&&!RoleMappings[Entry.target]);
         const NewParent=Boolean(Spec.parent&&!DesiredParent);
-        if (NewRoleReferences||NewParent||Hash(ChannelState(Existing))!==Hash(DesiredChannel(Spec,GuildId,RoleMappings,ChannelMappings))) {
+        if (NewRoleReferences||NewParent||Hash(ChannelState(Existing,Spec))!==Hash(DesiredChannel(Spec,GuildId,RoleMappings,ChannelMappings,Existing))) {
           Operations.push(OperationFor('channel','update',Spec.key,Existing.id,Spec));
           Preconditions[`channel:${Existing.id}`]=Structural(Existing,'channel');
         }
       }
     }
-    if (BlueprintValue.guild?.name && SnapshotValue.guild.name!==BlueprintValue.guild.name) {
-      Operations.push(OperationFor('guild','update',undefined,GuildId,{name:BlueprintValue.guild.name}));
-      Preconditions[`guild:${GuildId}`]=Hash({name:SnapshotValue.guild.name});
+    if (BlueprintValue.guild&&Object.values(BlueprintValue.guild).some(Value=>Value!==undefined)) {
+      const Spec=BlueprintValue.guild;
+      const Keys=[Spec.afkChannel,Spec.systemChannel,Spec.rulesChannel,Spec.publicUpdatesChannel,Spec.safetyAlertsChannel]
+        .filter((Value):Value is string=>typeof Value==='string');
+      for(const Key of Keys) {
+        if(!BlueprintValue.channels.some(Item=>Item.key===Key)&&!ChannelMappings[Key])
+          throw new Error(`Guild channel key ${Key} is not in blueprint or mapped`);
+      }
+      for(const [Key,Value] of Object.entries({afkChannel:Spec.afkChannel,systemChannel:Spec.systemChannel,
+        rulesChannel:Spec.rulesChannel,publicUpdatesChannel:Spec.publicUpdatesChannel,safetyAlertsChannel:Spec.safetyAlertsChannel})) {
+        if(typeof Value!=='string') continue;
+        const Planned=BlueprintValue.channels.find(Item=>Item.key===Value);
+        const Existing=SnapshotValue.channels.find(Item=>Item.id===ChannelMappings[Value]);
+        const Type=Planned?ChannelTypes[Planned.type]:Existing?.type;
+        if(Key==='afkChannel'?Type!==ChannelType.GuildVoice:
+          ![ChannelType.GuildText,ChannelType.GuildAnnouncement].includes(Type??-1))
+          throw new Error(`Guild ${Key} references an incompatible channel`);
+      }
+      const Unresolved=Keys.some(Key=>!ChannelMappings[Key]);
+      if(Unresolved||Hash(GuildState(SnapshotValue.guild,Spec))!==Hash(DesiredGuild(Spec,ChannelMappings))) {
+        Operations.push(OperationFor('guild','update',undefined,GuildId,Spec));
+        Preconditions[`guild:${GuildId}`]=Hash(GuildState(SnapshotValue.guild,Spec));
+      }
     }
     const Now=new Date().toISOString();
     const PlanValue:Plan={id:`plan_${randomUUID()}`,guildId:GuildId,actor:Actor,mode:Mode,blueprint:BlueprintValue,
@@ -212,18 +235,21 @@ export class ControlPlane {
         if (List.some(Item=>Item.name===Name)) throw new Error(`PLAN_STALE: ${Resource} name ${Name} appeared after planning`);
         continue;
       }
-      const Current=Kind==='role'?SnapshotValue.roles.find(Item=>Item.id===Id):Kind==='channel'?SnapshotValue.channels.find(Item=>Item.id===Id):{name:SnapshotValue.guild.name};
-      const Actual=Kind==='guild'?Hash(Current):Structural(Current as DiscordRole|DiscordChannel|undefined,Kind as 'role'|'channel');
+      const Current=Kind==='role'?SnapshotValue.roles.find(Item=>Item.id===Id):Kind==='channel'?SnapshotValue.channels.find(Item=>Item.id===Id):SnapshotValue.guild;
+      const Actual=Kind==='guild'?Hash(GuildState(SnapshotValue.guild,PlanValue.blueprint.guild??{name:SnapshotValue.guild.name})):
+        Structural(Current as DiscordRole|DiscordChannel|undefined,Kind as 'role'|'channel');
       if (Actual!==Expected) throw new Error(`PLAN_STALE: ${Target} changed after planning`);
     }
   }
-  private async ChannelBody(GuildId:string,Spec:Channel):Promise<Record<string,unknown>> {
-    const Desired=DesiredChannel(Spec,GuildId,this.Store.GetMappings(GuildId,'role'),this.Store.GetMappings(GuildId,'channel'));
+  private async ChannelBody(GuildId:string,Spec:Channel,Current?:DiscordChannel):Promise<Record<string,unknown>> {
+    const Desired=DesiredChannel(Spec,GuildId,this.Store.GetMappings(GuildId,'role'),this.Store.GetMappings(GuildId,'channel'),Current);
     const Body:Record<string,unknown>={name:Desired.name,type:Desired.type,parent_id:Desired.parent_id,
       permission_overwrites:Desired.permission_overwrites};
     if (Desired.type===ChannelType.GuildCategory) delete Body.parent_id;
     if ([ChannelType.GuildText,ChannelType.GuildAnnouncement,ChannelType.GuildForum,ChannelType.GuildMedia].includes(Desired.type)) Body.topic=Desired.topic;
     if (Desired.type!==ChannelType.GuildCategory&&Desired.type!==ChannelType.GuildStageVoice) Body.nsfw=Desired.nsfw;
+    Object.assign(Body,ChannelSettingsBody(Desired.type,Spec,Current));
+    if(Spec.position!==undefined) Body.position=Spec.position;
     return Body;
   }
   private async Execute(PlanValue:Plan,OperationValue:Operation):Promise<void> {
@@ -235,7 +261,10 @@ export class ControlPlane {
       this.Store.DeleteMappingById(GuildId,OperationValue.resource,OperationValue.targetId);
       return;
     }
-    if (OperationValue.resource==='guild') {await this.Discord.Patch(`/guilds/${GuildId}`,OperationValue.desired,Reason);return;}
+    if (OperationValue.resource==='guild') {
+      const Body=DesiredGuild(OperationValue.desired as GuildDesired,this.Store.GetMappings(GuildId,'channel'));
+      await this.Discord.Patch(`/guilds/${GuildId}`,Body,Reason);return;
+    }
     if (OperationValue.resource==='role') {
       const Body=RoleBody(OperationValue.desired as Role);
       const Result=OperationValue.action==='create'
@@ -243,7 +272,9 @@ export class ControlPlane {
         :await this.Discord.Patch<{id:string}>(`/guilds/${GuildId}/roles/${OperationValue.targetId}`,Body,Reason);
       OperationValue.resultId=Result.id;
     } else {
-      const Body=await this.ChannelBody(GuildId,OperationValue.desired as Channel);
+      const Current=OperationValue.action==='update'&&OperationValue.targetId?
+        await this.Discord.RequireGuildChannel(GuildId,OperationValue.targetId):undefined;
+      const Body=await this.ChannelBody(GuildId,OperationValue.desired as Channel,Current);
       if (OperationValue.action==='update') delete Body.type;
       const Result=OperationValue.action==='create'
         ?await this.Discord.Post<{id:string}>(`/guilds/${GuildId}/channels`,Body,Reason)
@@ -297,7 +328,12 @@ export class ControlPlane {
     const SnapshotValue=await this.Discord.Snapshot(PlanValue.guildId);
     const Issues:string[]=[];
     for (const Item of PlanValue.operations) {
-      if (Item.resource==='guild') continue;
+      if (Item.resource==='guild') {
+        const Desired=Item.desired as GuildDesired;
+        if(Hash(GuildState(SnapshotValue.guild,Desired))!==Hash(DesiredGuild(Desired,this.Store.GetMappings(PlanValue.guildId,'channel'))))
+          Issues.push('Guild settings do not match');
+        continue;
+      }
       const List=Item.resource==='role'?SnapshotValue.roles:SnapshotValue.channels;
       if (Item.action==='delete') {
         if (List.some(Current=>Current.id===Item.targetId)) Issues.push(`${Item.resource} ${Item.targetId} still exists`);
@@ -307,7 +343,7 @@ export class ControlPlane {
         if (!Current) {
           Issues.push(`${Item.resource} ${Item.key??Item.targetId} mutation not observed`);continue;
         }
-        const Actual=Item.resource==='role'?RoleState(Current as DiscordRole):ChannelState(Current as DiscordChannel);
+        const Actual=Item.resource==='role'?RoleState(Current as DiscordRole,Desired as Role):ChannelState(Current as DiscordChannel,Desired as Channel);
         const Wanted=Item.resource==='role'?DesiredRole(Desired as Role):DesiredChannel(Desired as Channel,PlanValue.guildId,
           this.Store.GetMappings(PlanValue.guildId,'role'),this.Store.GetMappings(PlanValue.guildId,'channel'));
         if (Hash(Actual)!==Hash(Wanted)) Issues.push(`${Item.resource} ${Item.key??Item.targetId} state does not match`);
@@ -316,15 +352,18 @@ export class ControlPlane {
     for (const Spec of PlanValue.blueprint.roles) {
       const Id=this.Store.GetMapping(PlanValue.guildId,'role',Spec.key);
       const Current=SnapshotValue.roles.find(Item=>Item.id===Id);
-      if (!Current||Hash(RoleState(Current))!==Hash(DesiredRole(Spec))) Issues.push(`Role ${Spec.key} does not match`);
+      if (!Current||Hash(RoleState(Current,Spec))!==Hash(DesiredRole(Spec))) Issues.push(`Role ${Spec.key} does not match`);
     }
     for (const Spec of PlanValue.blueprint.channels) {
       const Id=this.Store.GetMapping(PlanValue.guildId,'channel',Spec.key);
       const Current=SnapshotValue.channels.find(Item=>Item.id===Id);
       const Wanted=DesiredChannel(Spec,PlanValue.guildId,this.Store.GetMappings(PlanValue.guildId,'role'),this.Store.GetMappings(PlanValue.guildId,'channel'));
-      if (!Current||Hash(ChannelState(Current))!==Hash(Wanted)) Issues.push(`Channel ${Spec.key} does not match`);
+      if (!Current||Hash(ChannelState(Current,Spec))!==Hash(Wanted)) Issues.push(`Channel ${Spec.key} does not match`);
     }
-    if (PlanValue.blueprint.guild?.name&&SnapshotValue.guild.name!==PlanValue.blueprint.guild.name) Issues.push('Guild name does not match');
+    if (PlanValue.blueprint.guild&&Object.values(PlanValue.blueprint.guild).some(Value=>Value!==undefined)&&
+      Hash(GuildState(SnapshotValue.guild,PlanValue.blueprint.guild))!==
+        Hash(DesiredGuild(PlanValue.blueprint.guild,this.Store.GetMappings(PlanValue.guildId,'channel'))))
+      Issues.push('Guild settings do not match');
     if (PlanValue.mode==='REPLACE'||PlanValue.blueprint.policy?.pruneChannels) {
       const Wanted=new Set(PlanValue.blueprint.channels.map(Spec=>this.Store.GetMapping(PlanValue.guildId,'channel',Spec.key)));
       for (const ChannelValue of SnapshotValue.channels) if (!Wanted.has(ChannelValue.id)) Issues.push(`Unexpected channel ${ChannelValue.id}`);

@@ -5,12 +5,12 @@ import {Define,type OperationDefinition} from './registry.js';
 import type {ControlPlane} from './control.js';
 import type {ActorIdentity} from './assistant-types.js';
 import type {DiscordMessage} from './discord.js';
+import {SendContent,EditContent,MessageBody} from './message-payload.js';
 
 const GuildChannel=z.object({guildId:Snowflake,channelId:Snowflake});
 const Message=GuildChannel.extend({messageId:Snowflake});
 const Thread=z.object({guildId:Snowflake,threadId:Snowflake});
 const ThreadUser=Thread.extend({userId:Snowflake});
-const Text=z.string().min(1).max(2000);
 const Timestamp=z.string().datetime({offset:true});
 const Emoji=z.string().min(1).max(64).refine(Value=>{
   if (/^[A-Za-z0-9_]{2,32}:\d{17,20}$/.test(Value)) return true;
@@ -18,6 +18,25 @@ const Emoji=z.string().min(1).max(64).refine(Value=>{
 },'Emoji must be Unicode or name:id for a custom emoji');
 const EmojiMessage=Message.extend({emoji:Emoji});
 const Reason=(Actor:ActorIdentity,Id:string,Name:string)=>`DiscordControl action=${Id} actor=${Actor.id} ${Name}`;
+const SendSchema=GuildChannel.safeExtend(SendContent.shape).refine(Value=>
+  Boolean(Value.content||Value.embeds?.length||Value.components?.length||Value.stickerIds?.length||Value.poll),
+  'A message body is required');
+const EditSchema=Message.safeExtend(EditContent.shape).refine(Value=>
+  Value.content!==undefined||Value.embeds!==undefined||Value.components!==undefined,
+  'An editable message field is required');
+async function CheckMessagePayload(Control:ControlPlane,Args:{guildId:string;channelId:string;
+  allowedMentions?:{roles?:string[]};replyTo?:{messageId:string}}) {
+  await Control.Discord.RequireGuildChannel(Args.guildId,Args.channelId);
+  if(Args.allowedMentions?.roles?.length) {
+    const Roles=await Control.Discord.Get<{id:string}[]>(`/guilds/${Args.guildId}/roles`);
+    const Ids=new Set(Roles.map(Role=>Role.id));
+    if(Args.allowedMentions.roles.some(Id=>!Ids.has(Id))) throw new Error('Mention role does not belong to the exact guild');
+  }
+  if(Args.replyTo) {
+    const Referenced=await Control.Discord.Get<DiscordMessage>(`/channels/${Args.channelId}/messages/${Args.replyTo.messageId}`);
+    if(Referenced.channel_id!==Args.channelId) throw new Error('Reply target does not belong to the exact channel');
+  }
+}
 
 async function ChannelMutation<T>(Control:ControlPlane,Actor:ActorIdentity,Name:string,
   Args:{guildId:string;channelId:string},TargetId:string,
@@ -49,19 +68,19 @@ function YoungSnowflake(Id:string):boolean {
   return Created<=Date.now()&&Date.now()-Created<14*86400000;
 }
 export const DiscordOperations:OperationDefinition[]=[
-  Define('SendMessage','messages','write','Send one text message without automatic mentions.',GuildChannel.extend({content:Text}),(C,A,Actor)=>
-    ChannelMutation(C,Actor,'send-message',A,A.channelId,async Id=>{
-      const Result=await C.Discord.Post<DiscordMessage>(`/channels/${A.channelId}/messages`,{content:A.content,allowed_mentions:{parse:[]}},Reason(Actor,Id,'send-message'));
+  Define('SendMessage','messages','write','Send a bounded message with controlled mentions.',SendSchema,(C,A,Actor)=>
+    C.RunDirect(A.guildId,Actor.id,'send-message',A.channelId,async()=>CheckMessagePayload(C,A),async Id=>{
+      const Result=await C.Discord.Post<DiscordMessage>(`/channels/${A.channelId}/messages`,MessageBody(A),Reason(Actor,Id,'send-message'));
       return {guildId:A.guildId,channelId:A.channelId,messageId:Result.id,createdAt:Result.timestamp};
     }), 'messages.write'),
-  Define('EditMessage','messages','write','Edit one exact bot message.',Message.extend({content:Text}),(C,A,Actor)=>
+  Define('EditMessage','messages','write','Edit one exact bot message with bounded rich fields.',EditSchema,(C,A,Actor)=>
     C.RunDirect(A.guildId,Actor.id,'edit-message',A.messageId,async()=>{
-      await C.Discord.RequireGuildChannel(A.guildId,A.channelId);
+      await CheckMessagePayload(C,A);
       const Original=await C.Discord.Get<DiscordMessage>(`/channels/${A.channelId}/messages/${A.messageId}`);
       if(Original.author.id!==C.Discord.GetBotUserId()) throw new Error('Message is not authored by this bot');
     },async Id=>{
       const Result=await C.Discord.Patch<DiscordMessage>(`/channels/${A.channelId}/messages/${A.messageId}`,
-        {content:A.content,allowed_mentions:{parse:[]}},Reason(Actor,Id,'edit-message'));
+        MessageBody(A),Reason(Actor,Id,'edit-message'));
       return {guildId:A.guildId,channelId:A.channelId,messageId:Result.id,editedAt:Result.edited_timestamp};
     }), 'messages.write'),
   Define('DeleteMessage','messages','destructive','Delete one exact message.',Message,(C,A,Actor)=>

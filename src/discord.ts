@@ -4,19 +4,34 @@ import { Snowflake } from './types.js';
 import { EventDispatcher, NormalizeEvent } from './events.js';
 import type { OperationalEvent } from './assistant-types.js';
 
-export type DiscordRole = {id:string; name:string; permissions:string; position:number; managed:boolean; hoist?:boolean; mentionable?:boolean; color?:number};
-export type DiscordChannel = {id:string; guild_id?:string; name:string; type:number; parent_id?:string|null; position?:number; topic?:string|null; nsfw?:boolean; permission_overwrites?:{id:string;type:number;allow:string;deny:string}[];thread_metadata?:{archive_timestamp?:string}};
-export type DiscordGuild = {id:string; name:string; owner_id:string; rules_channel_id?:string|null; public_updates_channel_id?:string|null; features?:string[]};
-export type DiscordMember = {user:{id:string;username:string;bot?:boolean}; roles:string[]; nick?:string|null};
+export type DiscordRole = {id:string; name:string; permissions:string; position:number; managed:boolean; hoist?:boolean; mentionable?:boolean; color?:number;unicode_emoji?:string|null};
+export type DiscordChannel = {id:string; guild_id?:string; name:string; type:number; parent_id?:string|null; position?:number; topic?:string|null; nsfw?:boolean;
+  rate_limit_per_user?:number;bitrate?:number;user_limit?:number;rtc_region?:string|null;video_quality_mode?:number;
+  default_auto_archive_duration?:number;default_thread_rate_limit_per_user?:number;default_sort_order?:number|null;default_forum_layout?:number;flags?:number;
+  available_tags?:{id:string;name:string;moderated?:boolean;emoji_id?:string|null;emoji_name?:string|null}[];
+  default_reaction_emoji?:{emoji_id?:string|null;emoji_name?:string|null}|null;
+  archived?:boolean;locked?:boolean;invitable?:boolean;applied_tags?:string[];
+  permission_overwrites?:{id:string;type:number;allow:string;deny:string}[];thread_metadata?:{archive_timestamp?:string;archived?:boolean;locked?:boolean;invitable?:boolean}};
+export type DiscordGuild = {id:string; name:string; owner_id:string;description?:string|null;icon?:string|null;banner?:string|null;
+  afk_channel_id?:string|null;afk_timeout?:number;system_channel_id?:string|null;system_channel_flags?:number;
+  rules_channel_id?:string|null; public_updates_channel_id?:string|null;safety_alerts_channel_id?:string|null;
+  verification_level?:number;default_message_notifications?:number;explicit_content_filter?:number;preferred_locale?:string;
+  features?:string[];premium_tier?:number;vanity_url_code?:string|null};
+export type DiscordMember = {user:{id:string;username:string;bot?:boolean}; roles:string[]; nick?:string|null;
+  communication_disabled_until?:string|null;mute?:boolean;deaf?:boolean;channel_id?:string|null};
 export type Snapshot = {
   guildId:string; capturedAt:string; completeness:{channels:'complete'|'accessible_only';threads:'none';members:'omitted'|'complete'|'partial';messages:'omitted'};
   omissions:string[]; capabilities:{permissions:string[]; highestRolePosition:number; memberList:boolean};
   guild:DiscordGuild; roles:DiscordRole[]; channels:DiscordChannel[]; members?:DiscordMember[];
 };
 export type DiscordMessage={id:string;channel_id:string;guild_id?:string;author:{id:string;username?:string};content:string;
-  timestamp:string;edited_timestamp?:string|null;type:number;attachments?:{id:string;filename:string;size:number;url:string}[]};
+  timestamp:string;edited_timestamp?:string|null;type:number;attachments?:{id:string;filename:string;size:number;url:string}[];
+  poll?:{question:{text?:string};answers:{answer_id:number;poll_media:{text?:string;emoji?:{id?:string;name?:string}}}[];
+    expiry?:string|null;allow_multiselect:boolean;results?:{is_finalized:boolean;answer_counts:{id:number;count:number}[]}}};
 export type MessageRecord={id:string;guildId:string;channelId:string;authorId:string;content:string;createdAt:string;
-  editedAt?:string;type:number;attachments:{id:string;filename:string;size:number;url:string}[]};
+  editedAt?:string;type:number;attachments:{id:string;filename:string;size:number;url:string}[];
+  poll?:{question?:string;answers:{id:number;text?:string;emoji?:{id?:string;name?:string}}[];
+    expiresAt?:string|null;allowMultiselect:boolean;results?:{finalized:boolean;counts:{id:number;count:number}[]}}};
 export type AuditEvent={id:string;guildId:string;actionType:number;actorId?:string;targetId?:string;
   reason?:string;createdAt:string;changes?:{key:string;oldValue?:unknown;newValue?:unknown}[]};
 
@@ -161,6 +176,10 @@ export class DiscordAdapter {
     Snowflake.parse(GuildId);
     if (!this.Client.guilds.cache.has(GuildId)) throw new Error('Bot is not in the exact requested guild');
   }
+  async RequireGuildMember(GuildId:string,UserId:string):Promise<DiscordMember> {
+    this.RequireGuild(GuildId);Snowflake.parse(UserId);
+    return this.Get<DiscordMember>(`/guilds/${GuildId}/members/${UserId}`);
+  }
   async RequireGuildChannel(GuildId:string,ChannelId:string):Promise<DiscordChannel> {
     Snowflake.parse(GuildId);Snowflake.parse(ChannelId);
     this.RequireGuild(GuildId);
@@ -171,7 +190,12 @@ export class DiscordAdapter {
   ProjectMessage(GuildId:string,Value:DiscordMessage):MessageRecord {
     return {id:Value.id,guildId:GuildId,channelId:Value.channel_id,authorId:Value.author.id,content:Value.content,
       createdAt:Value.timestamp,editedAt:Value.edited_timestamp??undefined,type:Value.type,
-      attachments:(Value.attachments??[]).map(Item=>({id:Item.id,filename:Item.filename,size:Item.size,url:Item.url}))};
+      attachments:(Value.attachments??[]).map(Item=>({id:Item.id,filename:Item.filename,size:Item.size,url:Item.url})),
+      ...(Value.poll?{poll:{question:Value.poll.question.text,answers:Value.poll.answers.map(Item=>({id:Item.answer_id,
+        text:Item.poll_media.text,emoji:Item.poll_media.emoji})),expiresAt:Value.poll.expiry,
+        allowMultiselect:Value.poll.allow_multiselect,
+        ...(Value.poll.results?{results:{finalized:Value.poll.results.is_finalized,
+          counts:Value.poll.results.answer_counts.map(Item=>({id:Item.id,count:Item.count}))}}:{})}}:{})};
   }
   async GetMessage(GuildId:string,ChannelId:string,MessageId:string):Promise<{message:MessageRecord;completeness:'exact-fetch'}> {
     Snowflake.parse(MessageId);await this.RequireGuildChannel(GuildId,ChannelId);

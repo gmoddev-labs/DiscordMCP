@@ -22,6 +22,12 @@ function Fixture() {
   const Adapter={
     GetActiveServers:()=>[{id:GuildId,name:'Test',available:true,memberCount:1}],
     Snapshot:async()=>structuredClone(State),
+    RequireGuildChannel:async(Guild:string,Id:string)=>{
+      if(Guild!==GuildId) throw new Error('Wrong guild');
+      const Item=State.channels.find(Value=>Value.id===Id);
+      if(!Item) throw new Error('Channel not found');
+      return structuredClone(Item);
+    },
     Post:async (Path:string,Body:Record<string,unknown>)=>{
       const Id=String(Next++);
       if (Path.endsWith('/roles')) State.roles.push({id:Id,name:String(Body.name),permissions:String(Body.permissions),position:1,managed:false,
@@ -336,5 +342,60 @@ test('mapping order is deterministic and interrupted plan can be abandoned',asyn
     await assert.rejects(F.Control.ApplyPlan(Plan.id,'tester'),/Interrupted running/);
     await F.Control.AbandonPlan(Plan.id,'tester');
     assert.equal(F.Storage.GetPlan(Plan.id)?.status,'abandoned');
+  } finally {F.Close();}
+});
+
+test('v1 blueprint reconciles optional channel and guild settings through semantic channel keys',async()=>{
+  const F=Fixture();
+  try {
+    const ChannelId='123456789012345692';
+    F.State.channels.push({id:ChannelId,guild_id:GuildId,name:'general',type:0,rate_limit_per_user:0});
+    await F.Control.AdoptResource(GuildId,'channel','general',ChannelId);
+    const Blueprint={version:1,channels:[{key:'general',name:'general',type:'text',rateLimitPerUser:10}],
+      guild:{description:'A shared project server',systemChannel:'general'}};
+    const Plan=await F.Control.PlanServer(GuildId,Blueprint,'RECONCILE','tester');
+    assert.equal(Plan.operations.filter(Item=>Item.resource==='channel').length,1);
+    assert.equal(Plan.operations.filter(Item=>Item.resource==='guild').length,1);
+    const Applied=await F.Control.ApplyPlan(Plan.id,'tester');
+    assert.equal(Applied.status,'succeeded');
+    assert.equal(F.State.channels[0]?.rate_limit_per_user,10);
+    assert.equal(F.State.guild.system_channel_id,ChannelId);
+    assert.equal((await F.Control.VerifyServer(Plan.id)).verified,true);
+  } finally {F.Close();}
+});
+
+test('forum tag updates require exact existing tag IDs and stale optional state blocks apply',async()=>{
+  const F=Fixture();
+  try {
+    const ChannelId='123456789012345693',TagId='123456789012345694';
+    F.State.channels.push({id:ChannelId,guild_id:GuildId,name:'forum',type:15,
+      available_tags:[{id:TagId,name:'News',moderated:false}]});
+    await F.Control.AdoptResource(GuildId,'channel','forum',ChannelId);
+    await assert.rejects(F.Control.PlanServer(GuildId,{version:1,channels:[{key:'forum',name:'forum',type:'forum',
+      forum:{availableTags:[{name:'Updates'}]}}]},'RECONCILE','tester'),/exact IDs/);
+    const Plan=await F.Control.PlanServer(GuildId,{version:1,channels:[{key:'forum',name:'forum',type:'forum',
+      forum:{availableTags:[{id:TagId,name:'Updates'}]}}]},'RECONCILE','tester');
+    F.State.channels[0]!.available_tags![0]!.name='Changed elsewhere';
+    await assert.rejects(F.Control.ApplyPlan(Plan.id,'tester'),/PLAN_STALE/);
+  } finally {F.Close();}
+});
+
+test('forum tag and role emoji reconcile using exact identities',async()=>{
+  const F=Fixture();
+  try {
+    const ChannelId='123456789012345693',TagId='123456789012345694',RoleId='123456789012345695';
+    F.State.channels.push({id:ChannelId,guild_id:GuildId,name:'forum',type:15,
+      available_tags:[{id:TagId,name:'News',moderated:false}]});
+    F.State.roles.push({id:RoleId,name:'Member',permissions:'0',position:1,managed:false});
+    await F.Control.AdoptResource(GuildId,'channel','forum',ChannelId);
+    await F.Control.AdoptResource(GuildId,'role','member',RoleId);
+    const Plan=await F.Control.PlanServer(GuildId,{version:1,
+      roles:[{key:'member',name:'Member',permissions:[],unicodeEmoji:'🔔'}],
+      channels:[{key:'forum',name:'forum',type:'forum',forum:{availableTags:[{id:TagId,name:'Updates'}]}}]},
+      'RECONCILE','tester');
+    const Applied=await F.Control.ApplyPlan(Plan.id,'tester');
+    assert.equal(Applied.status,'succeeded');
+    assert.equal(F.State.roles.find(Item=>Item.id===RoleId)?.unicode_emoji,'🔔');
+    assert.equal(F.State.channels.find(Item=>Item.id===ChannelId)?.available_tags?.[0]?.name,'Updates');
   } finally {F.Close();}
 });
