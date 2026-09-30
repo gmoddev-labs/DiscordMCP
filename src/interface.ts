@@ -11,8 +11,9 @@ import {MemberOperations} from './member-operations.js';
 import {AdminOperations} from './admin-operations.js';
 import {ThreadOperations} from './thread-operations.js';
 import {AutoModOperations} from './automod-operations.js';
+import {CommunityConfigOperations} from './community-config-operations.js';
 
-const Definitions=[...LegacyOperations,...DiscordOperations,...CommunityOperations,...PermissionOperations,...MemberOperations,...AdminOperations,...ThreadOperations,...AutoModOperations];
+const Definitions=[...LegacyOperations,...DiscordOperations,...CommunityOperations,...PermissionOperations,...MemberOperations,...AdminOperations,...ThreadOperations,...AutoModOperations,...CommunityConfigOperations];
 export const Operations:ReadonlyMap<string,OperationDefinition>=new Map(Definitions.map(Item=>[Item.Name,Item]));
 if(Operations.size!==Definitions.length) throw new Error('Duplicate operation name');
 export const Calls:Record<string,z.ZodObject<z.ZodRawShape>>=Object.fromEntries(Definitions.map(Item=>[Item.Name,Item.Schema]));

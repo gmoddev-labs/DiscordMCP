@@ -10,6 +10,7 @@ import {Dispatch} from '../src/interface.js';
 
 const GuildId='123456789012345678',RuleId='123456789012345679',ChannelId='123456789012345680';
 const ForeignId='123456789012345681',RoleId='123456789012345682';
+const PromptId='123456789012345683',OptionId='123456789012345684';
 const Actor={id:'local-mcp:foundation4a',kind:'local-mcp' as const};
 function Fixture() {
   const Directory=mkdtempSync(join(tmpdir(),'discord-f4a-'));
@@ -17,6 +18,12 @@ function Fixture() {
   const Requests:{method:string;path:string;body?:any}[]=[];
   const Permissions=['ManageGuild','ModerateMembers'];
   const Rules:any[]=[];
+  const Guild={id:GuildId,features:['COMMUNITY']};
+  const Onboarding:any={guild_id:GuildId,enabled:false,mode:0,default_channel_ids:[ChannelId],prompts:[
+    {id:PromptId,title:'Projects',type:0,single_select:false,required:false,in_onboarding:true,options:[
+      {id:OptionId,title:'Engine',description:'Existing',channel_ids:[ChannelId],role_ids:[RoleId],emoji_id:null,emoji_name:null,emoji_animated:false}
+    ]}
+  ]};
   let Failure:unknown;
   const Adapter={
     RequireGuild:(Id:string)=>{if(Id!==GuildId) throw new Error('Wrong guild');},
@@ -24,13 +31,14 @@ function Fixture() {
       if(Id!==GuildId||Channel!==ChannelId) throw new Error('Channel does not belong to the exact requested guild');
       return {id:ChannelId,guild_id:GuildId,type:0};
     },
-    Snapshot:async()=>({guildId:GuildId,guild:{id:GuildId,features:['COMMUNITY']},
+    Snapshot:async()=>({guildId:GuildId,guild:structuredClone(Guild),
       roles:[{id:GuildId,name:'@everyone',permissions:'0',position:0,managed:false},{id:RoleId,name:'role',permissions:'0',position:1,managed:false}],
       channels:[{id:ChannelId,guild_id:GuildId,name:'text',type:0}],capabilities:{permissions:Permissions,highestRolePosition:10,memberList:false},
       completeness:{channels:'complete',threads:'none',members:'omitted',messages:'omitted'},omissions:[],capturedAt:new Date().toISOString()}) as Snapshot,
     Get:async(Path:string)=>{
       Requests.push({method:'GET',path:Path});
       if(Path===`/guilds/${GuildId}/auto-moderation/rules`) return structuredClone(Rules);
+      if(Path===`/guilds/${GuildId}/onboarding`) return structuredClone(Onboarding);
       if(Path.endsWith(`/${RuleId}`)) return structuredClone(Rules.find(Item=>Item.id===RuleId));
       throw new Error(`Unexpected GET ${Path}`);
     },
@@ -46,8 +54,12 @@ function Fixture() {
       Object.assign(Rules[0],Body);return structuredClone(Rules[0]);
     },
     Delete:async(Path:string)=>{Requests.push({method:'DELETE',path:Path});if(Failure) throw Failure;Rules.splice(0,1);}
+    ,RequestPut:async(Path:string,_Reason:string,Body:any)=>{
+      Requests.push({method:'PUT',path:Path,body:Body});if(Failure) throw Failure;
+      if(Path===`/guilds/${GuildId}/onboarding`) Object.assign(Onboarding,Body);
+    }
   };
-  return {Control:new ControlPlane(Adapter as unknown as DiscordAdapter,StoreValue),Rules,Permissions,Requests,
+  return {Control:new ControlPlane(Adapter as unknown as DiscordAdapter,StoreValue),Rules,Permissions,Requests,Guild,Onboarding,
     SetFailure:(Value:unknown)=>{Failure=Value;},Close:()=>{StoreValue.Close();rmSync(Directory,{recursive:true,force:true});}};
 }
 test('AutoMod typed creation, exact references, limits, and direct-action uncertainty',async()=>{
@@ -66,6 +78,38 @@ test('AutoMod typed creation, exact references, limits, and direct-action uncert
     F.SetFailure(new DiscordError(0,'NETWORK','disconnected'));
     await assert.rejects(Dispatch(F.Control,'DeleteAutoModRule',{guildId:GuildId,ruleId:RuleId},Actor),/state=uncertain/);
     await assert.rejects(Dispatch(F.Control,'ModifyAutoModRule',{guildId:GuildId,ruleId:RuleId,changes:{enabled:false}},Actor),/uncertain mutation/);
+  } finally {F.Close();}
+});
+test('onboarding hash prevents stale writes; prompt and option patch preserves omitted state',async()=>{
+  const F=Fixture();
+  try {
+    F.Permissions.push('ManageRoles');
+    const Initial=await Dispatch(F.Control,'GetOnboarding',{guildId:GuildId},Actor) as any;
+    await assert.rejects(Dispatch(F.Control,'ModifyOnboarding',{guildId:GuildId,expectedStateHash:'0'.repeat(64),enabled:true},Actor),/state changed/);
+    await assert.rejects(Dispatch(F.Control,'ModifyOnboarding',{guildId:GuildId,expectedStateHash:Initial.stateHash,
+      defaultChannelIds:[ForeignId]},Actor),/exact requested guild/);
+    const Updated=await Dispatch(F.Control,'ModifyOnboarding',{guildId:GuildId,expectedStateHash:Initial.stateHash,
+      promptChanges:{upsert:[{id:PromptId,title:'Projects and tools'}]}},Actor) as any;
+    assert.equal(Updated.verified,true);
+    assert.equal(Updated.onboarding.prompts[0].options[0].id,OptionId);
+    assert.equal(Updated.onboarding.prompts[0].options[0].description,'Existing');
+    await Dispatch(F.Control,'ModifyOnboarding',{guildId:GuildId,expectedStateHash:Updated.stateHash,
+      promptChanges:{upsert:[{id:PromptId,optionChanges:{removeIds:[OptionId]}}]}},Actor);
+    assert.equal(F.Onboarding.prompts[0].options.length,0);
+  } finally {F.Close();}
+});
+test('onboarding requires Community, roles permission, and enabling constraints',async()=>{
+  const F=Fixture();
+  try {
+    const Initial=await Dispatch(F.Control,'GetOnboarding',{guildId:GuildId},Actor) as any;
+    F.Guild.features=[];
+    await assert.rejects(Dispatch(F.Control,'ModifyOnboarding',{guildId:GuildId,expectedStateHash:Initial.stateHash,enabled:true},Actor),
+      (Error:any)=>Error.code==='COMMUNITY_REQUIRED');
+    F.Guild.features=['COMMUNITY'];
+    await assert.rejects(Dispatch(F.Control,'ModifyOnboarding',{guildId:GuildId,expectedStateHash:Initial.stateHash,enabled:true},Actor),/ManageRoles/);
+    F.Permissions.push('ManageRoles');
+    await assert.rejects(Dispatch(F.Control,'ModifyOnboarding',{guildId:GuildId,expectedStateHash:Initial.stateHash,enabled:true},Actor),/7 eligible/);
+    assert.equal(F.Requests.filter(Item=>Item.method==='PUT').length,0);
   } finally {F.Close();}
 });
 test('AutoMod timeout needs ModerateMembers and trigger count limits apply before POST',async()=>{
