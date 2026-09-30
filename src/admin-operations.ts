@@ -83,17 +83,25 @@ export const AdminOperations:OperationDefinition[]=[
   })).min(1).max(100)}),(C,A,Actor)=>{
     type Position={channelId:string;position?:number;parentId?:string|null;lockPermissions?:boolean};
     if(new Set(A.positions.map((Item:Position)=>Item.channelId)).size!==A.positions.length) throw new Error('Duplicate channel IDs');
+    if(A.positions.filter((Item:Position)=>Item.parentId!==undefined).length>1)
+      throw new Error('Discord permits at most one parent change per channel-position request');
     const Body=A.positions.map((Item:Position)=>({id:Item.channelId,...(Item.position!==undefined?{position:Item.position}:{}),
       ...(Item.parentId!==undefined?{parent_id:Item.parentId}:{}),
       ...(Item.lockPermissions!==undefined?{lock_permissions:Item.lockPermissions}:{})}));
     return C.RunDirect(A.guildId,Actor.id,'set-channel-positions',A.guildId,async()=>{
       for(const Item of A.positions) {
         const Current=await C.Discord.RequireGuildChannel(A.guildId,Item.channelId);
+        if(Item.lockPermissions!==undefined&&(Item.parentId===undefined||Item.parentId===null||Item.parentId===Current.parent_id))
+          throw new Error('lockPermissions requires an actual move to a new parent category');
+        if(Item.parentId!==undefined&&Item.parentId===Current.parent_id)
+          throw new Error('The requested parent is already assigned');
         if(Item.parentId!==undefined&&Item.parentId!==null) {
           const Parent=await C.Discord.RequireGuildChannel(A.guildId,Item.parentId);
           if(Parent.type!==ChannelType.GuildCategory||Current.type===ChannelType.GuildCategory)
             throw new Error('Parent must be a category and target must be a child channel');
         }
+        if(Item.parentId===null&&Current.type===ChannelType.GuildCategory)
+          throw new Error('A category cannot be moved out of a parent');
       }
     },async Id=>{
       await C.Discord.Patch<void>(`/guilds/${A.guildId}/channels`,Body,Reason(Actor,Id,'set-channel-positions'));

@@ -14,6 +14,7 @@ const GuildId='123456789012345678',BotId='123456789012345679',UserId='1234567890
 const TextId='123456789012345681',VoiceId='123456789012345682',ForumId='123456789012345683';
 const ThreadId='123456789012345684',MessageId='123456789012345685',TagId='123456789012345686';
 const ForeignId='123456789012345687',RoleId='123456789012345688';
+const CategoryId='123456789012345689';
 const Owner={id:'local-mcp:foundation3',kind:'local-mcp' as const};
 test('blueprint specs reject unsupported fields instead of discarding them',()=>{
   assert.equal(ChannelSpec.safeParse({key:'text',name:'text',type:'text',unknownSetting:true}).success,false);
@@ -27,6 +28,7 @@ function Fixture() {
   const Channels:DiscordChannel[]=[
     {id:TextId,guild_id:GuildId,name:'text',type:ChannelType.GuildText},
     {id:VoiceId,guild_id:GuildId,name:'voice',type:ChannelType.GuildVoice},
+    {id:CategoryId,guild_id:GuildId,name:'category',type:ChannelType.GuildCategory},
     {id:ForumId,guild_id:GuildId,name:'forum',type:ChannelType.GuildForum,
       available_tags:[{id:TagId,name:'News',moderated:false}]},
     {id:ThreadId,guild_id:GuildId,name:'thread',type:ChannelType.PublicThread,parent_id:TextId,
@@ -204,6 +206,25 @@ test('channel mutations preserve forum tag IDs and accept voice settings',async(
     assert.equal((F.Requests.at(-1)?.body as {bitrate:number}).bitrate,64000);
     await Dispatch(F.Control,'SetChannelPositions',{guildId:GuildId,positions:[{channelId:TextId,position:1}]},Owner);
     assert.equal(F.Requests.at(-1)?.path,`/guilds/${GuildId}/channels`);
+  } finally {F.Close();}
+});
+
+test('channel-position batches permit one parent move and reject incompatible parent changes before REST',async()=>{
+  const F=Fixture();
+  try {
+    await Dispatch(F.Control,'SetChannelPositions',{guildId:GuildId,positions:[
+      {channelId:TextId,position:1},{channelId:VoiceId,position:2}]},Owner);
+    await Dispatch(F.Control,'SetChannelPositions',{guildId:GuildId,positions:[
+      {channelId:TextId,parentId:CategoryId,lockPermissions:true},{channelId:VoiceId,position:3}]},Owner);
+    const Sent=F.Requests.filter(Item=>Item.path===`/guilds/${GuildId}/channels`);
+    assert.equal(Sent.length,2);
+    await assert.rejects(Dispatch(F.Control,'SetChannelPositions',{guildId:GuildId,positions:[
+      {channelId:TextId,parentId:CategoryId},{channelId:VoiceId,parentId:CategoryId}]},Owner),/at most one parent/);
+    await assert.rejects(Dispatch(F.Control,'SetChannelPositions',{guildId:GuildId,positions:[
+      {channelId:VoiceId,lockPermissions:true}]},Owner),/requires an actual move/);
+    await assert.rejects(Dispatch(F.Control,'SetChannelPositions',{guildId:GuildId,positions:[
+      {channelId:TextId,parentId:ForeignId}]},Owner),/exact requested guild/);
+    assert.equal(F.Requests.filter(Item=>Item.path===`/guilds/${GuildId}/channels`).length,2);
   } finally {F.Close();}
 });
 
