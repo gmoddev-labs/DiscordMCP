@@ -47,7 +47,9 @@ export class ControlPlane {
   async GetCapabilities(GuildId:string) {
     const SnapshotValue=await this.Discord.Snapshot(GuildId);
     return {...SnapshotValue.capabilities,actions:{manageRoles:HasPermission(SnapshotValue,'ManageRoles'),
-      kickMembers:HasPermission(SnapshotValue,'KickMembers'),banMembers:HasPermission(SnapshotValue,'BanMembers')}};
+      kickMembers:HasPermission(SnapshotValue,'KickMembers'),banMembers:HasPermission(SnapshotValue,'BanMembers'),
+      manageGuild:HasPermission(SnapshotValue,'ManageGuild'),moderateMembers:HasPermission(SnapshotValue,'ModerateMembers'),
+      manageChannels:HasPermission(SnapshotValue,'ManageChannels')}};
   }
   async AdoptResource(GuildId:string,Kind:'role'|'channel',Key:string,ResourceId:string):Promise<{guildId:string;kind:string;key:string;resourceId:string}> {
     Snowflake.parse(GuildId); Snowflake.parse(ResourceId);

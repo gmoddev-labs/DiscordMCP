@@ -6,7 +6,8 @@ export function NormalizeEvent(Input:EventInput):OperationalEvent {
   if (!/^\d{17,20}$/.test(Input.guildId)) throw new Error('Event requires an exact guild ID');
   return {id:Input.id??`event_${randomUUID()}`,guildId:Input.guildId,observedAt:Input.observedAt??new Date().toISOString(),
     type:Input.type,channelId:Input.channelId,messageId:Input.messageId,authorId:Input.authorId,userId:Input.userId,
-    roleId:Input.roleId,threadId:Input.threadId,accountCreatedAt:Input.accountCreatedAt};
+    roleId:Input.roleId,threadId:Input.threadId,accountCreatedAt:Input.accountCreatedAt,
+    ruleId:Input.ruleId,ruleTriggerType:Input.ruleTriggerType,actionType:Input.actionType};
 }
 
 export class EventDispatcher {

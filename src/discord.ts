@@ -75,6 +75,15 @@ export class DiscordAdapter {
       this.Events.Dispatch(NormalizeEvent({guildId:Channel.guildId,type:'channel.updated',channelId:Channel.id}));});
     this.Client.on('channelDelete',Channel=>{if ('guildId' in Channel&&Channel.guildId)
       this.Events.Dispatch(NormalizeEvent({guildId:Channel.guildId,type:'channel.deleted',channelId:Channel.id}));});
+    this.Client.on('autoModerationRuleCreate',Rule=>this.Events.Dispatch(NormalizeEvent({guildId:Rule.guild.id,
+      type:'automod.rule.created',ruleId:Rule.id,ruleTriggerType:Rule.triggerType})));
+    this.Client.on('autoModerationRuleUpdate',(_Old,Rule)=>this.Events.Dispatch(NormalizeEvent({guildId:Rule.guild.id,
+      type:'automod.rule.updated',ruleId:Rule.id,ruleTriggerType:Rule.triggerType})));
+    this.Client.on('autoModerationRuleDelete',Rule=>this.Events.Dispatch(NormalizeEvent({guildId:Rule.guild.id,
+      type:'automod.rule.deleted',ruleId:Rule.id,ruleTriggerType:Rule.triggerType})));
+    this.Client.on('autoModerationActionExecution',Execution=>this.Events.Dispatch(NormalizeEvent({guildId:Execution.guild.id,
+      type:'automod.executed',ruleId:Execution.ruleId,ruleTriggerType:Execution.ruleTriggerType,
+      actionType:Execution.action.type,channelId:Execution.channelId??undefined,userId:Execution.userId})));
   }
   OnEvent(Handler:(EventValue:OperationalEvent)=>void|Promise<void>):()=>void {return this.Events.Subscribe(Handler);}
   async Start(): Promise<void> { await this.Client.login(this.Token); }
