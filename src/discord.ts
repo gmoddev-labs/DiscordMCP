@@ -48,7 +48,8 @@ export class DiscordAdapter {
   readonly Events=new EventDispatcher();
   constructor(Token: string,private readonly FetchImpl:typeof fetch=fetch) {
     this.Token = Token;
-    const Intents=[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMessages];
+    const Intents=[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.AutoModerationConfiguration,GatewayIntentBits.AutoModerationExecution];
     if (process.env.CONTROL_MEMBER_EVENTS==='true') Intents.push(GatewayIntentBits.GuildMembers);
     this.Client = new Client({intents:Intents});
     this.Client.on('messageCreate',Message=>{
@@ -83,7 +84,8 @@ export class DiscordAdapter {
       type:'automod.rule.deleted',ruleId:Rule.id,ruleTriggerType:Rule.triggerType})));
     this.Client.on('autoModerationActionExecution',Execution=>this.Events.Dispatch(NormalizeEvent({guildId:Execution.guild.id,
       type:'automod.executed',ruleId:Execution.ruleId,ruleTriggerType:Execution.ruleTriggerType,
-      actionType:Execution.action.type,channelId:Execution.channelId??undefined,userId:Execution.userId})));
+      actionType:Execution.action.type,channelId:Execution.channelId??undefined,
+      messageId:Execution.messageId??undefined,userId:Execution.userId})));
   }
   OnEvent(Handler:(EventValue:OperationalEvent)=>void|Promise<void>):()=>void {return this.Events.Subscribe(Handler);}
   async Start(): Promise<void> { await this.Client.login(this.Token); }

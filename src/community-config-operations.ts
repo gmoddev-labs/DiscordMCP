@@ -146,6 +146,14 @@ function Body(Value:Onboarding) {
         description:Option.description,channel_ids:Option.channel_ids,role_ids:Option.role_ids,
         emoji_id:Option.emoji_id,emoji_name:Option.emoji_name,emoji_animated:Option.emoji_animated}))}))};
 }
+function Project(Value:Onboarding) {
+  return {guildId:Value.guild_id,enabled:Value.enabled,mode:Value.mode,defaultChannelIds:Value.default_channel_ids,
+    prompts:Value.prompts.map(Prompt=>({id:Prompt.id,type:Prompt.type,title:Prompt.title,
+      singleSelect:Prompt.single_select,required:Prompt.required,inOnboarding:Prompt.in_onboarding,
+      options:Prompt.options.map(Option=>({id:Option.id,title:Option.title,description:Option.description,
+        roleIds:Option.role_ids,channelIds:Option.channel_ids,
+        emoji:{id:Option.emoji_id,name:Option.emoji_name,animated:Option.emoji_animated}}))})),stateHash:Hash(Value)};
+}
 function Matches(Expected:Onboarding,Observed:Onboarding):boolean {
   if(Expected.guild_id!==Observed.guild_id||Expected.enabled!==Observed.enabled||Expected.mode!==Observed.mode||
     Hash(Expected.default_channel_ids)!==Hash(Observed.default_channel_ids)||Expected.prompts.length!==Observed.prompts.length) return false;
@@ -166,7 +174,7 @@ function Matches(Expected:Onboarding,Observed:Onboarding):boolean {
 export const CommunityConfigOperations:OperationDefinition[]=[
   Define('GetOnboarding','community','read','Read onboarding with exact IDs and a stable state hash.',Guild,async(C,A)=>{
     C.Discord.RequireGuild(A.guildId);
-    const Value=await Fetch(C,A.guildId);return {guildId:A.guildId,onboarding:Value,stateHash:Hash(Value),completeness:'exact-fetch'};
+    const Value=await Fetch(C,A.guildId);return {...Project(Value),completeness:'exact-fetch'};
   },'community.read'),
   Define('ModifyOnboarding','community','write','Patch onboarding prompts and options by exact ID with a state hash.',Modify,async(C,A,Actor)=>{
     if(!Object.entries(A).some(([Key,Value])=>!['guildId','expectedStateHash'].includes(Key)&&Value!==undefined))
@@ -182,7 +190,7 @@ export const CommunityConfigOperations:OperationDefinition[]=[
       await C.Discord.RequestPut(Path(A.guildId),Reason(Actor,Id),Body(Desired));
       const Actual=await Fetch(C,A.guildId);
       if(!Matches(Desired,Actual)) throw new Error('Onboarding result verification failed');
-      return {guildId:A.guildId,onboarding:Actual,stateHash:Hash(Actual),verified:true};
+      return {...Project(Actual),verified:true};
     });
   },'community.write')
 ];

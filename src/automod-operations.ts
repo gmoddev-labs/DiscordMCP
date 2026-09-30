@@ -8,13 +8,14 @@ import type {Snapshot} from './discord.js';
 const Guild=z.strictObject({guildId:Snowflake});
 const Rule=Guild.extend({ruleId:Snowflake});
 const Words=z.array(z.string().min(1).max(60)).max(100);
+const ProfileWords=z.array(z.string().min(1).max(60)).max(1000);
 const Patterns=z.array(z.string().min(1).max(260)).max(10);
 const Trigger=z.discriminatedUnion('kind',[
-  z.strictObject({kind:z.literal('keyword'),keywordFilter:Words.min(1),regexPatterns:Patterns.optional(),allowList:Words.optional()}),
+  z.strictObject({kind:z.literal('keyword'),keywordFilter:Words.optional(),regexPatterns:Patterns.optional(),allowList:Words.optional()}),
   z.strictObject({kind:z.literal('spam')}),
   z.strictObject({kind:z.literal('keywordPreset'),presets:z.array(z.union([z.literal(1),z.literal(2),z.literal(3)])).min(1).max(3),allowList:z.array(z.string().min(1).max(60)).max(1000).optional()}),
   z.strictObject({kind:z.literal('mentionSpam'),mentionTotalLimit:z.number().int().min(1).max(50),mentionRaidProtectionEnabled:z.boolean().optional()}),
-  z.strictObject({kind:z.literal('memberProfile'),keywordFilter:Words.min(1),regexPatterns:Patterns.optional(),allowList:Words.optional()})
+  z.strictObject({kind:z.literal('memberProfile'),keywordFilter:ProfileWords.optional(),regexPatterns:Patterns.optional(),allowList:Words.optional()})
 ]);
 const Action=z.discriminatedUnion('kind',[
   z.strictObject({kind:z.literal('blockMessage'),customMessage:z.string().max(150).optional()}),
@@ -37,6 +38,10 @@ const TriggerTypes={keyword:1,spam:3,keywordPreset:4,mentionSpam:5,memberProfile
 const Counts:Record<number,number>={1:6,3:1,4:1,5:1,6:1};
 const Path=(GuildId:string)=>`/guilds/${GuildId}/auto-moderation/rules`;
 const Reason=(Actor:ActorIdentity,Id:string,Name:string)=>`DiscordControl action=${Id} actor=${Actor.id} ${Name}`;
+function CheckTrigger(Value:TriggerInput):void {
+  if((Value.kind==='keyword'||Value.kind==='memberProfile')&&!Value.keywordFilter?.length&&!Value.regexPatterns?.length)
+    throw new Error('Keyword or regex pattern is required');
+}
 function RequirePermission(SnapshotValue:Snapshot,Name:string):void {
   if(!SnapshotValue.capabilities.permissions.includes('Administrator')&&!SnapshotValue.capabilities.permissions.includes(Name))
     throw new Error(`Bot lacks ${Name}`);
@@ -44,7 +49,7 @@ function RequirePermission(SnapshotValue:Snapshot,Name:string):void {
 function TriggerBody(Value:TriggerInput):{trigger_type:number;event_type:number;trigger_metadata:Record<string,unknown>} {
   const Metadata:Record<string,unknown>={};
   if(Value.kind==='keyword'||Value.kind==='memberProfile') {
-    Metadata.keyword_filter=Value.keywordFilter;
+    if(Value.keywordFilter) Metadata.keyword_filter=Value.keywordFilter;
     if(Value.regexPatterns) Metadata.regex_patterns=Value.regexPatterns;
     if(Value.allowList) Metadata.allow_list=Value.allowList;
   } else if(Value.kind==='keywordPreset') {
@@ -118,6 +123,7 @@ export const AutoModOperations:OperationDefinition[]=[
     const Input=Settings.parse(Raw) as SettingsInput;
     return C.RunDirect(A.guildId,Actor.id,'create-automod-rule',A.guildId,async()=>{
       const SnapshotValue=await C.Discord.Snapshot(A.guildId);RequirePermission(SnapshotValue,'ManageGuild');
+      CheckTrigger(Input.trigger);
       await CheckReferences(C,A.guildId,SnapshotValue,Input);
       const TriggerType=TriggerTypes[Input.trigger.kind];CheckActions(TriggerType,Input.actions,SnapshotValue);
       const Items=await C.Discord.Get<RuleValue[]>(Path(A.guildId));
@@ -135,6 +141,7 @@ export const AutoModOperations:OperationDefinition[]=[
     return C.RunDirect(A.guildId,Actor.id,'modify-automod-rule',A.ruleId,async()=>{
       const SnapshotValue=await C.Discord.Snapshot(A.guildId);RequirePermission(SnapshotValue,'ManageGuild');
       const Current=await FetchRule(C,A.guildId,A.ruleId);
+      if(ChangesValue.trigger) CheckTrigger(ChangesValue.trigger);
       if(ChangesValue.trigger&&TriggerTypes[ChangesValue.trigger.kind]!==Current.trigger_type)
         throw new Error('AutoMod trigger kind cannot change');
       await CheckReferences(C,A.guildId,SnapshotValue,ChangesValue);

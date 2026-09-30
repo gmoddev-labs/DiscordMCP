@@ -80,6 +80,7 @@ test('AutoMod typed creation, exact references, limits, and direct-action uncert
   try {
     const Base={guildId:GuildId,name:'filter',trigger:{kind:'keyword',keywordFilter:['spam']},actions:[{kind:'blockMessage'}]};
     await assert.rejects(Dispatch(F.Control,'CreateAutoModRule',{...Base,exemptChannelIds:[ForeignId]},Actor),/exact requested guild/);
+    await assert.rejects(Dispatch(F.Control,'CreateAutoModRule',{...Base,trigger:{kind:'keyword'}},Actor),/Keyword or regex/);
     await assert.rejects(Dispatch(F.Control,'CreateAutoModRule',{...Base,trigger:{kind:'spam'},actions:[{kind:'timeout',durationSeconds:60}]},Actor),/Timeout/);
     await assert.rejects(Dispatch(F.Control,'CreateAutoModRule',{...Base,actions:[{kind:'sendAlert',channelId:ForeignId}]},Actor),/exact requested guild/);
     const Created=await Dispatch(F.Control,'CreateAutoModRule',Base,Actor) as {rule:{id:string;enabled:boolean}};
@@ -98,14 +99,16 @@ test('onboarding hash prevents stale writes; prompt and option patch preserves o
   try {
     F.Permissions.push('ManageRoles');
     const Initial=await Dispatch(F.Control,'GetOnboarding',{guildId:GuildId},Actor) as any;
+    assert.equal(Initial.defaultChannelIds[0],ChannelId);
+    assert.equal(Initial.prompts[0].options[0].roleIds[0],RoleId);
     await assert.rejects(Dispatch(F.Control,'ModifyOnboarding',{guildId:GuildId,expectedStateHash:'0'.repeat(64),enabled:true},Actor),/state changed/);
     await assert.rejects(Dispatch(F.Control,'ModifyOnboarding',{guildId:GuildId,expectedStateHash:Initial.stateHash,
       defaultChannelIds:[ForeignId]},Actor),/exact requested guild/);
     const Updated=await Dispatch(F.Control,'ModifyOnboarding',{guildId:GuildId,expectedStateHash:Initial.stateHash,
       promptChanges:{upsert:[{id:PromptId,title:'Projects and tools'}]}},Actor) as any;
     assert.equal(Updated.verified,true);
-    assert.equal(Updated.onboarding.prompts[0].options[0].id,OptionId);
-    assert.equal(Updated.onboarding.prompts[0].options[0].description,'Existing');
+    assert.equal(Updated.prompts[0].options[0].id,OptionId);
+    assert.equal(Updated.prompts[0].options[0].description,'Existing');
     await Dispatch(F.Control,'ModifyOnboarding',{guildId:GuildId,expectedStateHash:Updated.stateHash,
       promptChanges:{upsert:[{id:PromptId,optionChanges:{removeIds:[OptionId]}}]}},Actor);
     assert.equal(F.Onboarding.prompts[0].options.length,0);
@@ -132,14 +135,14 @@ test('welcome screen hash, explicit channel replacement, and exact channel check
     await assert.rejects(Dispatch(F.Control,'ModifyWelcomeScreen',{guildId:GuildId,expectedStateHash:'0'.repeat(64),
       description:'New welcome'},Actor),/changed/);
     await assert.rejects(Dispatch(F.Control,'ModifyWelcomeScreen',{guildId:GuildId,expectedStateHash:Initial.stateHash,
-      channels:[{channelId:ForeignId,description:'Foreign'}]},Actor),/exact requested guild/);
+      welcomeChannels:[{channelId:ForeignId,description:'Foreign'}]},Actor),/exact requested guild/);
     const Result=await Dispatch(F.Control,'ModifyWelcomeScreen',{guildId:GuildId,expectedStateHash:Initial.stateHash,
       description:'New welcome'},Actor) as any;
     assert.equal(Result.verified,true);
-    assert.equal(Result.welcomeScreen.channels[0].channelId,ChannelId);
+    assert.equal(Result.welcomeScreen.welcomeChannels[0].channelId,ChannelId);
     const Replaced=await Dispatch(F.Control,'ModifyWelcomeScreen',{guildId:GuildId,expectedStateHash:Result.stateHash,
-      channels:[]},Actor) as any;
-    assert.equal(Replaced.welcomeScreen.channels.length,0);
+      welcomeChannels:[]},Actor) as any;
+    assert.equal(Replaced.welcomeScreen.welcomeChannels.length,0);
   } finally {F.Close();}
 });
 test('widget and incident actions validate exact channel and 24-hour bounds',async()=>{

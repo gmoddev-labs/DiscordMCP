@@ -12,7 +12,7 @@ const HashSchema=z.string().regex(/^[a-f0-9]{64}$/);
 const WelcomeChannel=z.strictObject({channelId:Snowflake,description:z.string().min(1).max(100),
   emojiId:Snowflake.nullable().optional(),emojiName:z.string().max(100).nullable().optional()});
 const WelcomeChange=Guild.extend({expectedStateHash:HashSchema,enabled:z.boolean().optional(),
-  description:z.string().max(140).nullable().optional(),channels:z.array(WelcomeChannel).max(5).optional()});
+  description:z.string().max(140).nullable().optional(),welcomeChannels:z.array(WelcomeChannel).max(5).optional()});
 const WidgetChange=Guild.extend({enabled:z.boolean().optional(),channelId:Snowflake.nullable().optional()});
 const IncidentChange=Guild.extend({disableInvitesUntil:z.string().datetime({offset:true}).nullable().optional(),
   disableDmsUntil:z.string().datetime({offset:true}).nullable().optional()});
@@ -30,7 +30,7 @@ function RequireCommunity(SnapshotValue:Snapshot):void {
 }
 function NormalizeWelcome(GuildValue:DiscordGuild,Value:Welcome) {
   return {enabled:GuildValue.features?.includes('WELCOME_SCREEN_ENABLED')??false,description:Value.description??null,
-    channels:(Value.welcome_channels??[]).map(Item=>({channelId:Item.channel_id,description:Item.description,
+    welcomeChannels:(Value.welcome_channels??[]).map(Item=>({channelId:Item.channel_id,description:Item.description,
       emojiId:Item.emoji_id??null,emojiName:Item.emoji_name??null}))};
 }
 async function FetchWelcome(Control:ControlPlane,GuildId:string) {
@@ -55,23 +55,23 @@ export const CommunitySurfaceOperations:OperationDefinition[]=[
     return {guildId:A.guildId,welcomeScreen:Value,stateHash:Hash(Value),completeness:'exact-fetch'};
   },'community.read'),
   Define('ModifyWelcomeScreen','community','write','Modify welcome content with an exact state hash; channels replace the full list.',WelcomeChange,async(C,A,Actor)=>{
-    if(A.enabled===undefined&&A.description===undefined&&A.channels===undefined) throw new Error('At least one welcome-screen change is required');
+    if(A.enabled===undefined&&A.description===undefined&&A.welcomeChannels===undefined) throw new Error('At least one welcome-screen change is required');
     let Desired:ReturnType<typeof NormalizeWelcome>;
     return C.RunDirect(A.guildId,Actor.id,'modify-welcome-screen',A.guildId,async()=>{
       const SnapshotValue=await C.Discord.Snapshot(A.guildId);RequireCommunity(SnapshotValue);RequirePermission(SnapshotValue);
       const Current=await FetchWelcome(C,A.guildId);
       if(Hash(Current)!==A.expectedStateHash) throw new OperationalError('STATE_STALE','Welcome screen changed; read it again',A.guildId);
-      if(A.channels) {
-        if(new Set(A.channels.map((Item:typeof A.channels[number])=>Item.channelId)).size!==A.channels.length)
+      if(A.welcomeChannels) {
+        if(new Set(A.welcomeChannels.map((Item:typeof A.welcomeChannels[number])=>Item.channelId)).size!==A.welcomeChannels.length)
           throw new Error('Duplicate welcome-screen channel ID');
-        for(const Item of A.channels) await C.Discord.RequireGuildChannel(A.guildId,Item.channelId);
+        for(const Item of A.welcomeChannels) await C.Discord.RequireGuildChannel(A.guildId,Item.channelId);
       }
       Desired={enabled:A.enabled??Current.enabled,description:A.description===undefined?Current.description:A.description,
-        channels:A.channels?.map((Item:typeof A.channels[number])=>({channelId:Item.channelId,description:Item.description,
-          emojiId:Item.emojiId??null,emojiName:Item.emojiName??null}))??Current.channels};
+        welcomeChannels:A.welcomeChannels?.map((Item:typeof A.welcomeChannels[number])=>({channelId:Item.channelId,description:Item.description,
+          emojiId:Item.emojiId??null,emojiName:Item.emojiName??null}))??Current.welcomeChannels};
     },async Id=>{
       await C.Discord.Patch<Welcome>(`/guilds/${A.guildId}/welcome-screen`,{
-        enabled:Desired.enabled,description:Desired.description,welcome_channels:Desired.channels.map(Item=>({
+        enabled:Desired.enabled,description:Desired.description,welcome_channels:Desired.welcomeChannels.map(Item=>({
           channel_id:Item.channelId,description:Item.description,emoji_id:Item.emojiId,emoji_name:Item.emojiName}))},
       Reason(Actor,Id,'modify-welcome-screen'));
       const Actual=await FetchWelcome(C,A.guildId);
