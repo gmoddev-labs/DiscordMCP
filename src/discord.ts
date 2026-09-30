@@ -139,6 +139,7 @@ export class DiscordAdapter {
   Get<T>(Path:string):Promise<T> {return this.Request<T>('GET',Path);}
   Post<T>(Path:string,Body:unknown,Reason:string):Promise<T> {return this.Request<T>('POST',Path,Body,Reason);}
   Patch<T>(Path:string,Body:unknown,Reason:string):Promise<T> {return this.Request<T>('PATCH',Path,Body,Reason);}
+  Put<T>(Path:string,Body:unknown,Reason:string):Promise<T> {return this.Request<T>('PUT',Path,Body,Reason);}
   Delete(Path:string,Reason:string):Promise<void> {return this.Request<void>('DELETE',Path,undefined,Reason);}
   RequestPut(Path:string,Reason:string,Body?:unknown):Promise<void> {return this.Request<void>('PUT',Path,Body,Reason);}
   async Snapshot(GuildId:string, IncludeMembers=false):Promise<Snapshot> {
